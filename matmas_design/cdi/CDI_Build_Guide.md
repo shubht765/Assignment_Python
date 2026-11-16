@@ -1,5 +1,13 @@
 # MATMAS – CDI process, step by step
 
+> **Update v1.2: an import package now exists.** Import `cdi/import/MATMAS_CDI_Import.zip` and follow `cdi/IMPORT_README.md`. It differs from the manual build below in four ways:
+> 1. The load mapping reads the run's files from a work folder on the central agent, `FF_MATMAS_WORK`, through a file list. It no longer reads OneLake directly. The extra step is `fi_P2O_101_MATMAS_OneLake_to_Work`.
+> 2. The source agents need no local folder connections. The ingestion task reads the folder directly.
+> 3. `fi_P2O_102_MATMAS_OneLake_Move` deletes the run folder from landing after the copy, so the purge notebook is optional.
+> 4. `ONELAKE_ROOT` uses the OneLake path format `/lh_p2o_intg_dev/Files/erp_to_matmas`.
+> The sections below stay valid as the reference for every setting.
+
+
 Built for the values seen in the org:
 
 | Item | Value |

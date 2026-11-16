@@ -5,12 +5,16 @@ A scheduled cloud taskflow reads `MATMAS.CTL_MATMAS_ROUTE` row by row. For each 
 | Path | What it is |
 |---|---|
 | `01_MATMAS_Design.md` | Requirements, flow, objects, config columns, sample walk-through, decisions |
+| `cdi/import/MATMAS_CDI_Import.zip` | **Import package**: taskflow, 3 file ingestion tasks, 4 mappings and 4 mapping tasks, plus the work-folder connection |
+| `cdi/IMPORT_README.md` | Import steps and the 10-minute post-import checklist |
+| `cdi/tools/build_matmas_import.py` | Regenerates the package. Every format is copied from real IDMC exports |
 | `cdi/CDI_Build_Guide.md` | Every CDI object with parameters, expressions and the taskflow step table |
 | `sql/01_tables.sql` | Config, run log, staging, reject, file history, ERP tables, views, `stg` interface views |
 | `sql/02_procedures.sql` | Apply (insert, upsert, update, delete, truncate-insert), retry, logging |
 | `sql/03_seed_config.sql` | JDE, Vision and SAP route rows. Replace the placeholder names |
 | `sql/04_test_without_cdi.sql` | SQL-only test of upsert, duplicate file, reject and retry, with expected results |
 | `sql/00_drop_all.sql` | DEV only: drops every object in schema MATMAS |
+| `agent_scripts/central/` | `matmas_work.cmd` and the design file for the central agent |
 | `agent_scripts/` | Archive script for the Command Task: `.cmd` and `.ps1` for Windows, `.sh` for Linux |
 | `samples/` | 6-field test files for JDE, Vision and SAP |
 | `fabric/nb_matmas_purge_landing.py` | Fabric notebook: removes copied run folders from `erp_to_matmas/landing` (only if the move task cannot delete) |
@@ -25,4 +29,4 @@ Run order:
 Verification status:
 - The SQL parses with a T-SQL parser. It has not been executed here, because no SQL Server is available.
 - The Linux archive script was tested: it archived the old file and left a file newer than the run start.
-- No CDI object was imported or run. There is no import package this time. The reader and load mappings need Filter and Expression transformations and a OneLake source, and the reference export contains none of those.
+- The import package was checked against real IDMC exports: checksums, internal references, property sets and taskflow links all verify. It has not been imported into IDMC yet. See `cdi/IMPORT_README.md` for the post-import checklist.
