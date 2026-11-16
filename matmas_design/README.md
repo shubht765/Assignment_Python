@@ -1,6 +1,6 @@
 # MATMAS – config-driven Material Master ingestion (Informatica CDI + OneLake + Fabric SQL)
 
-A scheduled cloud taskflow reads `MATMAS.CTL_MATMAS_ROUTE` row by row. For each row it copies the files from that row's Secure Agent folder into OneLake (`lh_p2o_intg_dev/Files/erp_to_matmas/landing/<ERP>`, connection `FABRIC.AMCOR.ONELAKE.P2O`) with one file ingestion task. It then loads them with one generic mapping, which adds Start Date and End Date to the 6 fields, into the ERP's own table, such as `MATMAS.JDE_MATERIAL_MASTER`. The operation comes from the config row. The collect task deletes the source file on the agent after copying it. The run folder in OneLake then moves to archive, duplicate or error.
+A scheduled cloud taskflow reads `cfg.matmas_route_config` row by row. For each row it copies the files from that row's Secure Agent folder into OneLake (`lh_p2o_intg_dev/Files/erp_to_matmas/landing/<ERP>`, connection `FABRIC.AMCOR.ONELAKE.P2O`) with one file ingestion task. It then loads them with one generic mapping, which adds Start Date and End Date to the 6 fields, into the ERP's own table, such as `matmas.jde_material_master`. The operation comes from the config row. The collect task deletes the source file on the agent after copying it. The run folder in OneLake then moves to archive, duplicate or error.
 
 | Path | What it is |
 |---|---|
@@ -19,7 +19,9 @@ A scheduled cloud taskflow reads `MATMAS.CTL_MATMAS_ROUTE` row by row. For each 
 
 Run order:
 
-1. On the Fabric SQL database, run `sql/01`, `sql/02` and `sql/03`, then fill in the real names.
+1. On the Fabric SQL database, run `sql/01`, `sql/02` and `sql/03`, then fill in the real names. If an earlier version with upper-case names (`MATMAS.CTL_MATMAS_ROUTE`, ...) is installed, run `sql/00_drop_all.sql` first (DEV only).
+
+All SQL names follow the database standard: lower case with underscores (`cfg.matmas_route_config`, `matmas.jde_material_master`, column `erp_item_number`), flags as `bit`, config tables in schema `cfg`.
 2. Run `sql/04`.
 3. Create the local folder connections, the 2 file ingestion tasks and the 4 mapping tasks from the guide.
 4. Build the taskflow and schedule it.

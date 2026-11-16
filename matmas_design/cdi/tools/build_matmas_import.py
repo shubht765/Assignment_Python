@@ -74,7 +74,8 @@ CLASS = ["com.informatica.metadata.template.common.Template",                   
          "com.informatica.metadata.template.common.rule.TmplAllRule",               # 26
          "com.informatica.metadata.template.ext.da.cloud.common.WriteOptions",      # 27
          "com.informatica.metadata.template.ext.da.cloud.common.FlatFileAttrs",     # 28
-         "com.informatica.metadata.template.ext.da.cloud.common.Option"]            # 29
+         "com.informatica.metadata.template.ext.da.cloud.common.Option",            # 29
+         "com.informatica.metadata.template.tx.tmpltarget.FieldMapping"]            # 30
 C = {n.rsplit(".", 1)[1]: i + 1 for i, n in enumerate(CLASS)}
 CLASS_INFO = {str(i + 1): n for i, n in enumerate(CLASS)}
 
@@ -206,17 +207,22 @@ class M:
         self.tx.append(t); self.layout[txname] = {"x": x, "y": 100}
         return t
 
-    def target(self, txname, conn, objname, cols, post_sql="", x=700):
+    def target(self, txname, conn, objname, cols, post_sql="", x=700, field_map=None):
         afs = [self.adapter_field(n, t, p, objname) for n, t, p in cols]
         t = {"$$ID": self.id(), "$$class": C["TmplTarget"], "augmented": "false", "createTime": now_iso(), "name": txname,
              "advancedProperties": [self.adv("Forward Rejected Rows", "true"), self.adv("Pre SQL", ""),
                                     self.adv("Post SQL", post_sql), self.adv("Update Override", "")],
-             "groups": [self.group("true", "false")], "createTarget": "false", "fieldMappingMode": "BY_NAME",
+             "groups": [self.group("true", "false")], "createTarget": "false",
+             "fieldMappingMode": "MANUAL" if field_map else "BY_NAME",
              "inputSorted": "false", "schemaProviderType": "SELECTED_OBJECT", "targetFieldsOrdered": "false",
              "updateColumns": [], "useLabels": "false", "useSequenceFields": "false",
              "fields": [self.tx_field(a, c[1]) for a, c in zip(afs, cols)]}
         t["dataAdapter"] = self._adapter(conn, "TOOLKIT", self._obj(objname, afs), write=True)
         t["manualMappings"] = {"$$ID": self.id(), "$$class": C["FieldMappings"]}
+        if field_map:   # same layout as the MANUAL targets in real exports: fromFieldName -> target TxField
+            t["manualMappings"]["mappingList"] = [
+                {"$$ID": self.id(), "$$class": C["FieldMapping"], "fromFieldName": field_map.get(f["name"], f["name"]),
+                 "toField": {"##ID": f["$$ID"], "$$class": C["TxField"]}} for f in t["fields"]]
         self.tx.append(t); self.layout[txname] = {"x": x, "y": 100}
         return t
 
@@ -252,7 +258,7 @@ class M:
 
 
 def log_cols():
-    return [("RUN_ID", "string", 30), ("ROUTE_ID", "string", 60), ("EVENT", "string", 30), ("MESSAGE", "string", 4000)]
+    return [("run_id", "string", 30), ("route_id", "string", 60), ("event", "string", 30), ("message", "string", 4000)]
 
 
 READER_OUT = ["TOTAL_ROUTES", "ROUTE_ID", "ERP_SYSTEM", "RUNTIME_ENVIRONMENT", "SOURCE_DIRECTORY", "FILE_PATTERN",
@@ -265,24 +271,25 @@ def m_reader(name):
     m.variable("RUN_GROUP", default="DAILY"); m.variable("ROW_ID", "integer", 10, "1"); m.variable("RUN_ID", prec=30)
     for p in READER_OUT:
         m.variable(p)
-    cols = [("ROW_NUM", "integer", 10, None), ("TOTAL_ROUTES", "integer", 10, None), ("RUN_GROUP", "string", 30, None),
-            ("ROUTE_ID", "string", 60, None), ("ERP_SYSTEM", "string", 30, None), ("RUNTIME_ENVIRONMENT", "string", 100, None),
-            ("SOURCE_CONNECTION", "string", 100, None), ("SOURCE_DIRECTORY", "string", 500, None),
-            ("FILE_PATTERN", "string", 200, None), ("SOURCE_ARCHIVE_DIRECTORY", "string", 500, None),
-            ("ONELAKE_CONNECTION", "string", 100, None), ("ONELAKE_LANDING_DIR", "string", 500, None),
-            ("ONELAKE_ARCHIVE_DIR", "string", 500, None), ("ONELAKE_DUPLICATE_DIR", "string", 500, None),
-            ("ONELAKE_ERROR_DIR", "string", 500, None), ("TARGET_TABLE", "string", 300, None),
-            ("LOAD_OPERATION", "string", 20, None), ("START_DATE_VALUE", "string", 10, None),
-            ("END_DATE_VALUE", "string", 10, None), ("NOTIFY_EMAIL", "string", 400, None)]
-    s = m.source("src_Route", JDBC_GUID, "MATMAS_ROUTE_READER", cols, x=100)
-    f = m.filter("flt_Row", "RUN_GROUP = $$RUN_GROUP AND ROW_NUM = $$ROW_ID", x=300)
+    # stg.matmas_route_reader columns (lower case, as in the SQL standard); $$ parameters stay upper case
+    cols = [("row_num", "integer", 10, None), ("total_routes", "integer", 10, None), ("run_group", "string", 30, None),
+            ("route_id", "string", 60, None), ("erp_system", "string", 30, None), ("runtime_environment", "string", 100, None),
+            ("source_connection", "string", 100, None), ("source_directory", "string", 500, None),
+            ("file_pattern", "string", 200, None),
+            ("onelake_connection", "string", 100, None), ("onelake_landing_dir", "string", 500, None),
+            ("onelake_archive_dir", "string", 500, None), ("onelake_duplicate_dir", "string", 500, None),
+            ("onelake_error_dir", "string", 500, None), ("target_table", "string", 300, None),
+            ("load_operation", "string", 20, None), ("start_date_value", "string", 10, None),
+            ("end_date_value", "string", 10, None), ("notify_email", "string", 400, None)]
+    s = m.source("src_Route", JDBC_GUID, "matmas_route_reader", cols, x=100)
+    f = m.filter("flt_Row", "run_group = $$RUN_GROUP AND row_num = $$ROW_ID", x=300)
     fields = [(f"v_{i+1:02d}", "VARIABLE", "string", 1000,
-               f"SETVARIABLE($${p}, {'TO_CHAR(TOTAL_ROUTES)' if p == 'TOTAL_ROUTES' else p})") for i, p in enumerate(READER_OUT)]
-    fields += [("RUN_ID", "OUTPUT", "string", 30, "$$RUN_ID"), ("EVENT", "OUTPUT", "string", 30, "'STARTED'"),
-               ("MESSAGE", "OUTPUT", "string", 4000,
-                "'row ' || TO_CHAR(ROW_NUM) || ' of ' || TO_CHAR(TOTAL_ROUTES) || ' on ' || RUNTIME_ENVIRONMENT")]
+               f"SETVARIABLE($${p}, {'TO_CHAR(total_routes)' if p == 'TOTAL_ROUTES' else p.lower()})") for i, p in enumerate(READER_OUT)]
+    fields += [("run_id", "OUTPUT", "string", 30, "$$RUN_ID"), ("event", "OUTPUT", "string", 30, "'STARTED'"),
+               ("message", "OUTPUT", "string", 4000,
+                "'row ' || TO_CHAR(row_num) || ' of ' || TO_CHAR(total_routes) || ' on ' || runtime_environment")]
     e = m.expression("exp_SetParams", fields, x=500)
-    t = m.target("tgt_RunLog", JDBC_GUID, "MATMAS_RUN_LOG", log_cols(), x=700)
+    t = m.target("tgt_RunLog", JDBC_GUID, "matmas_run_log", log_cols(), x=700)
     m.link(s, f); m.link(f, e); m.link(e, t)
     return m
 
@@ -290,6 +297,8 @@ def m_reader(name):
 HEADER = [("ERP_Item_Number", "ERP Item Number"), ("Material_Description", "Material Description"),
           ("Plant_Code", "Plant Code"), ("Supplier_Part_", "Supplier Part#"), ("Supplier_Number", "Supplier Number"),
           ("Manufacturing_Part_", "Manufacturing Part#")]   # field names as CDI derives them from the file header
+STAGE_COLS = ["erp_item_number", "material_description", "plant_code", "supplier_part_number", "supplier_number",
+              "manufacturing_part_number"]                  # stg.matmas_stage_file columns, same order as HEADER
 
 
 def m_load(name, onelake_guid):
@@ -298,17 +307,20 @@ def m_load(name, onelake_guid):
         m.variable(p, default=d)
     s_ = m.source("src_OneLakeFiles", onelake_guid, "erp_to_matmas/landing/JDE/_design/JDE_MATMAS_20261116.txt",
                   [(n, "string", 1000, nat) for n, nat in HEADER], x=100)
-    fields = [("RUN_ID", "OUTPUT", "string", 30, "$$RUN_ID"), ("ROUTE_ID", "OUTPUT", "string", 60, "$$ROUTE_ID"),
-              ("SOURCE_FILE_NAME", "OUTPUT", "string", 500, "$$SRC_DIRECTORY"),
-              ("START_DATE", "OUTPUT", "date", 29,
+    fields = [("run_id", "OUTPUT", "string", 30, "$$RUN_ID"), ("route_id", "OUTPUT", "string", 60, "$$ROUTE_ID"),
+              ("source_file_name", "OUTPUT", "string", 500, "$$SRC_DIRECTORY"),
+              ("start_date", "OUTPUT", "date", 29,
                "IIF(ISNULL($$START_DATE_VALUE) OR LTRIM(RTRIM($$START_DATE_VALUE)) = '', TRUNC(SESSSTARTTIME, 'DD'), TO_DATE($$START_DATE_VALUE, 'YYYY-MM-DD'))"),
-              ("END_DATE", "OUTPUT", "date", 29,
+              ("end_date", "OUTPUT", "date", 29,
                "TO_DATE(IIF(ISNULL($$END_DATE_VALUE) OR LTRIM(RTRIM($$END_DATE_VALUE)) = '', '9999-12-31', $$END_DATE_VALUE), 'YYYY-MM-DD')")]
     e = m.expression("exp_AddDates", fields, x=300)
     f = m.filter("flt_NotBlank", "LENGTH(LTRIM(RTRIM(" + " || ".join(n for n, _ in HEADER) + "))) > 0", x=500)
-    cols = [("RUN_ID", "string", 30), ("ROUTE_ID", "string", 60), ("SOURCE_FILE_NAME", "string", 500)]
-    cols += [(n, "string", 1000) for n, _ in HEADER] + [("START_DATE", "date", 10), ("END_DATE", "date", 10)]
-    t = m.target("tgt_Stage", JDBC_GUID, "MATMAS_STAGE_FILE", cols, post_sql="EXEC MATMAS.sp_MATMAS_ApplyStage", x=700)
+    cols = [("run_id", "string", 30), ("route_id", "string", 60), ("source_file_name", "string", 500)]
+    cols += [(c, "string", 1000) for c in STAGE_COLS] + [("start_date", "date", 10), ("end_date", "date", 10)]
+    # file header field -> lower-case stage column (MANUAL field mapping); the other fields map to themselves
+    fmap = {c: n for c, (n, _) in zip(STAGE_COLS, HEADER)}
+    t = m.target("tgt_Stage", JDBC_GUID, "matmas_stage_file", cols, post_sql="EXEC matmas.sp_apply_stage", x=700,
+                 field_map=fmap)
     m.link(s_, e); m.link(e, f); m.link(f, t)
     return m
 
@@ -317,13 +329,13 @@ def m_outcome(name):
     m = M(name, "MATMAS: read ARCHIVE / DUPLICATE / ERROR for this run and route into $$OUTCOME; log it.")
     for p in ("RUN_ID", "ROUTE_ID", "OUTCOME"):
         m.variable(p, prec=60)
-    s = m.source("src_Outcome", JDBC_GUID, "MATMAS_RUN_OUTCOME",
-                 [("RUN_ID", "string", 30, None), ("ROUTE_ID", "string", 60, None), ("OUTCOME", "string", 20, None)], x=100)
-    f = m.filter("flt_Run", "RUN_ID = $$RUN_ID AND ROUTE_ID = $$ROUTE_ID", x=300)
-    e = m.expression("exp_SetOutcome", [("v_01", "VARIABLE", "string", 20, "SETVARIABLE($$OUTCOME, OUTCOME)"),
-                                        ("EVENT", "OUTPUT", "string", 30, "'OUTCOME'"),
-                                        ("MESSAGE", "OUTPUT", "string", 4000, "'files go to ' || OUTCOME")], x=500)
-    t = m.target("tgt_RunLog", JDBC_GUID, "MATMAS_RUN_LOG", log_cols(), x=700)
+    s = m.source("src_Outcome", JDBC_GUID, "matmas_run_outcome",
+                 [("run_id", "string", 30, None), ("route_id", "string", 60, None), ("outcome", "string", 20, None)], x=100)
+    f = m.filter("flt_Run", "run_id = $$RUN_ID AND route_id = $$ROUTE_ID", x=300)
+    e = m.expression("exp_SetOutcome", [("v_01", "VARIABLE", "string", 20, "SETVARIABLE($$OUTCOME, outcome)"),
+                                        ("event", "OUTPUT", "string", 30, "'OUTCOME'"),
+                                        ("message", "OUTPUT", "string", 4000, "'files go to ' || outcome")], x=500)
+    t = m.target("tgt_RunLog", JDBC_GUID, "matmas_run_log", log_cols(), x=700)
     m.link(s, f); m.link(f, e); m.link(e, t)
     return m
 
@@ -332,10 +344,10 @@ def m_log(name):
     m = M(name, "MATMAS: write one event (NO_FILE, COLLECT_FAILED, ...) from in-out parameters.")
     for p in ("RUN_ID", "ROUTE_ID", "EVENT", "MESSAGE"):
         m.variable(p, prec=4000 if p == "MESSAGE" else 60)
-    s = m.source("src_OneRow", JDBC_GUID, "MATMAS_ONE_ROW", [("ONE", "integer", 10, None)], x=100)
-    e = m.expression("exp_Event", [("RUN_ID", "OUTPUT", "string", 30, "$$RUN_ID"), ("ROUTE_ID", "OUTPUT", "string", 60, "$$ROUTE_ID"),
-                                   ("EVENT", "OUTPUT", "string", 30, "$$EVENT"), ("MESSAGE", "OUTPUT", "string", 4000, "$$MESSAGE")], x=300)
-    t = m.target("tgt_RunLog", JDBC_GUID, "MATMAS_RUN_LOG", log_cols(), x=500)
+    s = m.source("src_OneRow", JDBC_GUID, "matmas_one_row", [("one", "integer", 10, None)], x=100)
+    e = m.expression("exp_Event", [("run_id", "OUTPUT", "string", 30, "$$RUN_ID"), ("route_id", "OUTPUT", "string", 60, "$$ROUTE_ID"),
+                                   ("event", "OUTPUT", "string", 30, "$$EVENT"), ("message", "OUTPUT", "string", 4000, "$$MESSAGE")], x=300)
+    t = m.target("tgt_RunLog", JDBC_GUID, "matmas_run_log", log_cols(), x=500)
     m.link(s, e); m.link(e, t)
     return m
 
@@ -664,7 +676,7 @@ def build_taskflow(tf_name, tf_guid, ids):
                    overrideAPIName="false">
             <parameterSet xmlns="http://schemas.active-endpoints.com/appmodules/screenflow/2021/04/taskflowModel.xsd"/>
             <appliesTo/>
-            <description>MATMAS: loop over MATMAS.CTL_MATMAS_ROUTE - collect agent files to OneLake, load, route files, archive.</description>
+            <description>MATMAS: loop over cfg.matmas_route_config - collect agent files to OneLake, load, route files, archive.</description>
             <tags/>
             <generator>Informatica Process Designer 11</generator>
             <input><parameter description="" name="RUN_GROUP" type="string"><options><option name="required">false</option></options></parameter></input>

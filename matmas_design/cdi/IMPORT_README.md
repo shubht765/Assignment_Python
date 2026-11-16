@@ -20,7 +20,7 @@ In Explore, open `fi_P2O_000_BPDWFS_PO_to_OneLake`, then use **Copy** twice. Nam
 | If file exists | Overwrite | Overwrite |
 | Schedule / file listener | None | None |
 
-The folders above are only defaults. The taskflow overrides them on every run from `MATMAS.CTL_MATMAS_ROUTE`.
+The folders above are only defaults. The taskflow overrides them on every run from `cfg.matmas_route_config`.
 
 ## Part 2: the taskflow
 
@@ -40,12 +40,12 @@ The same export also contains the real ID of the OneLake connection, which remov
 
 ## The flow
 
-For each row of `MATMAS.CTL_MATMAS_ROUTE`, the taskflow does the following.
+For each row of `cfg.matmas_route_config`, the taskflow does the following.
 
 1. **Read the row.** `mt_P2O_101_MATMAS_Route_Reader` returns the agent group, source folder, file pattern, OneLake folders, target table and operation.
 2. **Collect.** `fi_P2O_100_MATMAS_Agent_to_OneLake` runs on the row's Secure Agent. It copies `<source folder>/<pattern>` to `erp_to_matmas/landing/<ERP>/<RUN_ID>` in OneLake, then **deletes the file on the agent**. The copy is kept in OneLake.
 3. **Check for files.** If nothing was found, it logs `NO_FILE` and moves to the next row.
-4. **Load.** `mt_P2O_102_MATMAS_Load` reads the run folder in OneLake, adds Start Date and End Date to the 6 fields, and writes the stage. Its Post SQL applies the rows to `MATMAS.<ERP>_MATERIAL_MASTER` with the row's operation.
+4. **Load.** `mt_P2O_102_MATMAS_Load` reads the run folder in OneLake, adds Start Date and End Date to the 6 fields, and writes the stage. Its Post SQL applies the rows to `matmas.<erp>_material_master` with the row's operation.
 5. **Decide the outcome.** `mt_P2O_103_MATMAS_Outcome` returns ARCHIVE, DUPLICATE or ERROR.
 6. **Move.** `fi_P2O_101_MATMAS_OneLake_Move` moves `landing/<ERP>/<RUN_ID>` to `archive`, `duplicate` or `error/<ERP>/<RUN_ID>`.
 
@@ -76,7 +76,7 @@ Checks run on the package:
 
 ## Import steps
 
-1. **Database.** Run `sql/01_tables.sql`, `sql/02_procedures.sql` and `sql/03_seed_config.sql`. Fill in the real agent groups, source folders and patterns in `MATMAS.CTL_MATMAS_ROUTE`.
+1. **Database.** Run `sql/01_tables.sql`, `sql/02_procedures.sql` and `sql/03_seed_config.sql`. Fill in the real agent groups, source folders and patterns in `cfg.matmas_route_config`.
 2. **Lakehouse `lh_p2o_intg_dev`.** Upload `samples/JDE/JDE_MATMAS_20261116.txt` to `Files/erp_to_matmas/landing/JDE/_design/`. It is the design file of the load mapping.
 3. **Import.** In IDMC, go to Explore, then Import, and select `MATMAS_CDI_Import.zip`. Import all objects into `zPF_TCS_Shubham`.
 4. **If the import still reports errors**, scroll the Select Assets table to the right to the **Status** column and hover over each red status for its message. Send me those messages.
@@ -91,10 +91,10 @@ These settings have no public sample, so check each one once.
    - Connection `FABRIC.AMCOR.ONELAKE.P2O`. Object: the design file uploaded in import step 2.
    - Formatting: delimited, delimiter `|`, no text qualifier, column names from the first line.
    - Read the whole folder, using source type Directory or your connector's equivalent. Set the folder or directory override to **`$$SRC_DIRECTORY`**. The taskflow fills it with `landing/<ERP>/<RUN_ID>`.
-   - The six source fields should be named `ERP_Item_Number`, `Material_Description`, `Plant_Code`, `Supplier_Part_`, `Supplier_Number` and `Manufacturing_Part_`. The target view `MATMAS_STAGE_FILE` uses the same names, so field mapping is automatic. If CDI names them differently, map those fields by hand on the target.
+   - The six source fields should be named `ERP_Item_Number`, `Material_Description`, `Plant_Code`, `Supplier_Part_`, `Supplier_Number` and `Manufacturing_Part_`. The target `tgt_Stage` maps them by hand (field mapping Manual) to the lower-case columns of `stg.matmas_stage_file`: `erp_item_number`, `material_description`, `plant_code`, `supplier_part_number`, `supplier_number`, `manufacturing_part_number`. If CDI names the source fields differently, fix those links on the target's Field Mapping tab.
 2. **The OneLake connection in both `fi_P2O_*` tasks.** If the source or target shows no connection, select `FABRIC.AMCOR.ONELAKE.P2O`.
    - Alternatively, export `fi_P2O_000_BPDWFS_PO_to_OneLake` and send it to me. I'll regenerate the package with the connection's real IDs so this step goes away.
-3. **OneLake path format.** Compare the target location `/lh_p2o_intg_dev/Files/erp_to_matmas/landing/JDE` in `fi_P2O_100` with the format used in `fi_P2O_000_BPDWFS_PO_to_OneLake`. If the format differs, change `ONELAKE_ROOT` in `MATMAS.CTL_MATMAS_SETTING`.
+3. **OneLake path format.** Compare the target location `/lh_p2o_intg_dev/Files/erp_to_matmas/landing/JDE` in `fi_P2O_100` with the format used in `fi_P2O_000_BPDWFS_PO_to_OneLake`. If the format differs, change the `onelake_root` row in `cfg.matmas_setting`.
 4. **Ingestion step overrides.** In the taskflow, check the Input Fields of each ingestion step:
    - `IT_Collect`: Runtime Environment, Source Directory, File Pattern, OneLake target location.
    - `IT_Move`: Source Directory, OneLake target location.
@@ -105,9 +105,9 @@ These settings have no public sample, so check each one once.
 ## Check a run
 
 ```sql
-SELECT * FROM MATMAS.V_MATMAS_RUN_STATUS ORDER BY RUN_ID DESC, ROUTE_ID;
-SELECT * FROM MATMAS.JDE_MATERIAL_MASTER;
-SELECT * FROM MATMAS.MATERIAL_MASTER_REJECT ORDER BY REJECT_ID DESC;
+SELECT * FROM matmas.v_run_status ORDER BY run_id DESC, route_id;
+SELECT * FROM matmas.jde_material_master;
+SELECT * FROM matmas.material_master_reject ORDER BY reject_id DESC;
 ```
 
 A healthy route produces the trail `STARTED` → `LOADED` → `OUTCOME`. The files then sit in `erp_to_matmas/archive/<ERP>/<RUN_ID>`, and the agent folder is empty.

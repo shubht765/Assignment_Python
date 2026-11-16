@@ -2,6 +2,7 @@
 
 > **Update v1.3: import the package instead of building by hand.** Import `cdi/import/MATMAS_CDI_Import.zip` and follow `cdi/IMPORT_README.md`. The current flow is: read the row, then `fi_P2O_100` copies agent files to OneLake and deletes them on the agent, then the load mapping reads the OneLake run folder, then the outcome is decided, then `fi_P2O_101` moves the run folder to archive, duplicate or error.
 > There are no command tasks, no agent scripts and no local folder connections. Where this guide mentions `CT_ArchiveSource`, `SOURCE_ARCHIVE_DIRECTORY`, the work folder or the purge notebook, that part no longer applies. The rest stays valid as a reference.
+> **Update v1.7: lower-case SQL names.** Database objects and columns follow the lower-case standard (`cfg.matmas_route_config`, `matmas.run_log`, `stg.matmas_stage_file`, column `erp_item_number`, ...). Where this guide still shows a column in upper case, use the lower-case name from `sql/01_tables.sql`. Mapping in-out parameters (`$$RUN_ID`, `$$ROUTE_ID`, ...) stay upper case.
 
 
 Built for the values seen in the org:
@@ -33,7 +34,7 @@ tf_P2O_100_MATMAS_Orchestrator   (scheduled, runs in IDMC cloud)
 ├─ FilesFound?         0 files → DT_LogNoFile ───────────────────────────────┤
 ├─ DT_Load             mt_P2O_102_MATMAS_Load                                  │
 │                      landing/<ERP>/<RUN_ID> → 6 fields + START/END_DATE     │
-│                      → MATMAS stage → Post SQL → MATMAS.<ERP>_MATERIAL_MASTER (INSERT/UPSERT/...)
+│                      → MATMAS stage → Post SQL → matmas.<erp>_material_master (INSERT/UPSERT/...)
 ├─ DT_Outcome          mt_P2O_103_MATMAS_Outcome → ARCHIVE | DUPLICATE | ERROR │
 ├─ IT_Move             fi_P2O_101_MATMAS_OneLake_Move                          │
 │                      landing/<ERP>/<RUN_ID> → archive|duplicate|error/<ERP>/<RUN_ID>
@@ -62,19 +63,19 @@ The **central agent** is any runtime environment that reaches both OneLake and t
 
 1. **Database.** On the Fabric SQL database:
    - Run `sql/01_tables.sql`, then `sql/02_procedures.sql`, then `sql/03_seed_config.sql`.
-   - Check the computed paths with `SELECT * FROM MATMAS.V_MATMAS_ROUTE_READER;`.
+   - Check the computed paths with `SELECT * FROM matmas.v_route_reader;`.
    - Run `sql/04_test_without_cdi.sql` and compare with the expected results in its comments.
 2. **OneLake path format.** Open `fi_P2O_000_BPDWFS_PO_to_OneLake`, go to Target, and look at the **Target Directory**. Write the MATMAS root in exactly the same format:
    ```sql
-   UPDATE MATMAS.CTL_MATMAS_SETTING SET SETTING_VALUE = N'<same format>/erp_to_matmas' WHERE SETTING_NAME = 'ONELAKE_ROOT';
+   UPDATE cfg.matmas_setting SET setting_value = N'<same format>/erp_to_matmas' WHERE setting_name = 'onelake_root';
    ```
    The seeded value is `lh_p2o_intg_dev.Lakehouse/Files/erp_to_matmas`.
 3. **Lakehouse folders.** `landing/JDE` and `landing/Vision` exist. Also create `archive/JDE`, `archive/Vision`, `duplicate/JDE`, `duplicate/Vision`, `error/JDE` and `error/Vision`. The ingestion task may create them itself, but creating them avoids surprises.
 4. **Design sample.** Upload `samples/JDE/JDE_MATMAS_20261116.txt` to `Files/erp_to_matmas/landing/JDE/_design/`. The load mapping takes its field list from it.
-5. **Local folder connections.** Create one per source agent group, for example `LF_MATMAS_JDE` on `US.US02.01` and `LF_MATMAS_VISION` on `US.AMCOR.01`. Put the names in `CTL_MATMAS_ROUTE.SOURCE_CONNECTION`.
+5. **Local folder connections.** Create one per source agent group, for example `LF_MATMAS_JDE` on `US.US02.01` and `LF_MATMAS_VISION` on `US.AMCOR.01`. Put the names in `cfg.matmas_route_config.source_connection`.
 6. **Agent archive script.** Copy `agent_scripts/matmas_archive_source.cmd` and `.ps1` to `C:\Informatica\scripts\` on every source agent. Use the `.sh` on Linux agents.
 7. **Network.** Every source agent must reach `onelake.dfs.fabric.microsoft.com` over HTTPS. The collect step pushes from there.
-8. **Real values.** Fill the real agent groups, source folders and patterns into `MATMAS.CTL_MATMAS_ROUTE`.
+8. **Real values.** Fill the real agent groups, source folders and patterns into `cfg.matmas_route_config`.
 
 ---
 
@@ -126,7 +127,7 @@ If your file ingestion version does not accept OneLake as a source, leave this t
 
 **Transformations:**
 
-1. **Source** `src_Route`: connection `jdbcv2.MSSQL.sqldb-p2o-intg.stg`, single object **`MATMAS_ROUTE_READER`**, a view.
+1. **Source** `src_Route`: connection `jdbcv2.MSSQL.sqldb-p2o-intg.stg`, single object **`matmas_route_reader`**, a view.
 2. **Filter** `flt_Row`: `RUN_GROUP = $$RUN_GROUP AND ROW_NUM = $$ROW_ID`
 3. **Expression** `exp_SetParams`:
    - **Variable ports**, one per output parameter:
@@ -150,7 +151,7 @@ If your file ingestion version does not accept OneLake as a source, leave this t
      v_17 = SETVARIABLE($$NOTIFY_EMAIL,          NOTIFY_EMAIL)
      ```
    - **Output ports**: `o_RUN_ID = $$RUN_ID`, `o_ROUTE_ID = ROUTE_ID`, `o_EVENT = 'STARTED'`, `o_MESSAGE = 'row ' || TO_CHAR(ROW_NUM) || ' of ' || TO_CHAR(TOTAL_ROUTES) || ' on ' || RUNTIME_ENVIRONMENT`
-4. **Target** `tgt_RunLog`: same connection, object **`MATMAS_RUN_LOG`**, Insert. Map `o_*` to `RUN_ID`, `ROUTE_ID`, `EVENT`, `MESSAGE`.
+4. **Target** `tgt_RunLog`: same connection, object **`matmas_run_log`**, Insert. Map `o_*` to `RUN_ID`, `ROUTE_ID`, `EVENT`, `MESSAGE`.
 
 When `ROW_ID` is past the last row, the filter returns nothing. All outputs then stay empty, and the taskflow ends the loop.
 
@@ -199,12 +200,12 @@ When `ROW_ID` is past the last row, the filter returns nothing. All outputs then
    `LENGTH(LTRIM(RTRIM(o_ERP_ITEM_NUMBER || o_MATERIAL_DESCRIPTION || o_PLANT_CODE || o_SUPPLIER_PART_NUMBER || o_SUPPLIER_NUMBER || o_MANUFACTURING_PART_NUMBER))) > 0`
 4. **Target** `tgt_Stage`
    - Connection `jdbcv2.MSSQL.sqldb-p2o-intg.stg`, object **`MATMAS_MATERIAL_MASTER_STAGE`**, operation Insert. Map the `o_` ports to the same column names.
-   - **Advanced, Post SQL**: `EXEC MATMAS.sp_MATMAS_ApplyStage`
+   - **Advanced, Post SQL**: `EXEC matmas.sp_apply_stage`
    - Forward rejected rows: on.
 
 What the Post SQL does, using the row's `TARGET_TABLE`, `LOAD_OPERATION` and `KEY_COLUMNS`:
 
-| `LOAD_OPERATION` | Effect on `MATMAS.<ERP>_MATERIAL_MASTER` |
+| `LOAD_OPERATION` | Effect on `matmas.<erp>_material_master` |
 |---|---|
 | `INSERT` | Insert all valid rows |
 | `UPSERT` | Merge on the key columns. Update existing rows and keep their original START_DATE. Insert new keys. |
@@ -213,7 +214,7 @@ What the Post SQL does, using the row's `TARGET_TABLE`, `LOAD_OPERATION` and `KE
 | `TRUNCATE_INSERT` | Empty the table, then insert |
 
 In every mode:
-- Rows missing a key go to `MATMAS.MATERIAL_MASTER_REJECT`.
+- Rows missing a key go to `matmas.material_master_reject`.
 - Exact duplicate lines collapse.
 - A file already loaded for the route is skipped as `DUPLICATE_FILE`.
 - A failure rolls back that route, logs `APPLY_FAILED`, and **fails the task** so the taskflow takes its error path.
@@ -225,12 +226,12 @@ In every mode:
 ## 7. `m_P2O_103_MATMAS_Outcome`: where do the files go
 
 - **In-out parameters**, String: `RUN_ID`, `ROUTE_ID`, `OUTCOME`. Inputs from the taskflow, `OUTCOME` is the output.
-- **Source**: `MATMAS_RUN_OUTCOME`, a view.
+- **Source**: `matmas_run_outcome`, a view.
 - **Filter**: `RUN_ID = $$RUN_ID AND ROUTE_ID = $$ROUTE_ID`
 - **Expression**:
   - `v_1 = SETVARIABLE($$OUTCOME, OUTCOME)`
   - `o_RUN_ID = RUN_ID`, `o_ROUTE_ID = ROUTE_ID`, `o_EVENT = 'OUTCOME'`, `o_MESSAGE = 'files go to ' || OUTCOME`
-- **Target**: `MATMAS_RUN_LOG`, Insert.
+- **Target**: `matmas_run_log`, Insert.
 
 `OUTCOME` takes one of three values:
 
@@ -245,9 +246,9 @@ In every mode:
 ## 8. `m_P2O_104_MATMAS_Log`: write an event
 
 - **In-out parameters**, String: `RUN_ID`, `ROUTE_ID`, `EVENT`, `MESSAGE`, `FILE_COUNT` (default `0`).
-- **Source**: `MATMAS_ONE_ROW`
+- **Source**: `matmas_one_row`
 - **Expression**: `o_RUN_ID = $$RUN_ID`, `o_ROUTE_ID = $$ROUTE_ID`, `o_EVENT = $$EVENT`, `o_MESSAGE = SUBSTR($$MESSAGE, 1, 4000)`, `o_FILE_COUNT = TO_INTEGER($$FILE_COUNT)`
-- **Target**: `MATMAS_RUN_LOG`, Insert.
+- **Target**: `matmas_run_log`, Insert.
 
 ---
 
@@ -283,12 +284,12 @@ Pick every task output with the field picker. The formula it writes looks like `
 ## 10. Monitoring
 
 ```sql
-SELECT * FROM MATMAS.V_MATMAS_RUN_STATUS ORDER BY RUN_ID DESC, ROUTE_ID;            -- last event per route
-SELECT * FROM MATMAS.CTL_MATMAS_RUN_LOG WHERE RUN_ID = '<RUN_ID>' ORDER BY LOG_ID;  -- full trail
-SELECT * FROM MATMAS.V_MATMAS_RUN_OUTCOME WHERE RUN_ID = '<RUN_ID>';               -- archive/duplicate/error
-SELECT * FROM MATMAS.JDE_MATERIAL_MASTER;  SELECT * FROM MATMAS.VISION_MATERIAL_MASTER;
-SELECT * FROM MATMAS.MATERIAL_MASTER_REJECT ORDER BY REJECT_ID DESC;
-EXEC MATMAS.sp_MATMAS_ReapplyRun '<RUN_ID>', '<ROUTE_ID>';   -- retry after fixing config
+SELECT * FROM matmas.v_run_status ORDER BY run_id DESC, route_id;            -- last event per route
+SELECT * FROM matmas.run_log WHERE run_id = '<RUN_ID>' ORDER BY log_id;  -- full trail
+SELECT * FROM matmas.v_run_outcome WHERE run_id = '<RUN_ID>';               -- archive/duplicate/error
+SELECT * FROM matmas.jde_material_master;  SELECT * FROM matmas.vision_material_master;
+SELECT * FROM matmas.material_master_reject ORDER BY reject_id DESC;
+EXEC matmas.sp_reapply_run '<RUN_ID>', '<ROUTE_ID>';   -- retry after fixing config
 ```
 
 A healthy route produces this trail: `STARTED` → `LOADED` → `OUTCOME` ("files go to ARCHIVE").
@@ -306,7 +307,7 @@ A healthy route produces this trail: `STARTED` → `LOADED` → `OUTCOME` ("file
 
 ## 12. Onboarding the next ERP
 
-1. Run `EXEC MATMAS.sp_MATMAS_CreateErpTable N'<ERP>_MATERIAL_MASTER';`
-2. Add one row to `MATMAS.CTL_MATMAS_ROUTE`.
+1. Run `EXEC matmas.sp_create_erp_table N'<erp>_material_master';`
+2. Add one row to `cfg.matmas_route_config`.
 3. Create `landing`, `archive`, `duplicate` and `error/<ERP>` folders in `lh_p2o_intg_dev`.
 4. For a new agent group only: create a local folder connection and copy the archive script to the agent.

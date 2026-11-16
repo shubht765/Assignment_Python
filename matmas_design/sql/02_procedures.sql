@@ -1,151 +1,240 @@
 /* =====================================================================
-   MATMAS - 02: procedures
-   sp_MATMAS_ApplyStage : Post SQL of the generic load mapping. Applies every
-                          NEW staged row, route by route, and raises at the end
-                          if any route failed (so the CDI task shows failed).
-   sp_MATMAS_ApplyRoute : one run + route: validate, reject, skip duplicate
-                          files, de-duplicate, then INSERT / UPSERT / UPDATE /
-                          DELETE / TRUNCATE_INSERT into the route's ERP table.
-   sp_MATMAS_ReapplyRun : retry a failed run/route after fixing configuration.
-   sp_MATMAS_LogEvent   : write an event by hand (same table CDI writes to).
+   matmas - 02: procedures
+   matmas.sp_apply_stage  : Post SQL of the generic load mapping. Applies every
+                            NEW staged row, route by route, and raises at the
+                            end if any route failed (so the CDI task fails).
+   matmas.sp_apply_route  : one run + route: validate, reject, skip duplicate
+                            files, de-duplicate, then INSERT / UPSERT / UPDATE /
+                            DELETE / TRUNCATE_INSERT into the route's ERP table.
+   matmas.sp_reapply_run  : retry a failed run + route after fixing the config.
+   matmas.sp_log_event    : write an event by hand (same table CDI writes to).
    ===================================================================== */
 
 /* ---------------------------------------------------------------------
-   sp_MATMAS_ApplyRoute
+   matmas.sp_apply_route
    --------------------------------------------------------------------- */
-CREATE OR ALTER PROCEDURE MATMAS.sp_MATMAS_ApplyRoute
-    @RunId   VARCHAR(30),
-    @RouteId VARCHAR(60)
+CREATE OR ALTER PROCEDURE matmas.sp_apply_route
+    @run_id    VARCHAR(30),
+    @route_id  VARCHAR(60)
 AS
 BEGIN
-    SET NOCOUNT ON; SET XACT_ABORT ON;
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
 
-    DECLARE @schema SYSNAME, @table SYSNAME, @op VARCHAR(20), @keys NVARCHAR(500), @skipdup CHAR(1),
-            @tgt NVARCHAR(300), @sql NVARCHAR(MAX), @err NVARCHAR(2048),
-            @rej NVARCHAR(MAX), @keylist NVARCHAR(MAX), @on NVARCHAR(MAX), @set NVARCHAR(MAX),
-            @staged INT = 0, @rejected INT = 0, @dupfiles INT = 0, @duprows INT = 0, @collapsed INT = 0,
-            @ins INT = 0, @upd INT = 0, @del INT = 0, @dupnames NVARCHAR(2000), @msg NVARCHAR(4000);
+    DECLARE @schema     SYSNAME,
+            @table      SYSNAME,
+            @op         VARCHAR(20),
+            @keys       NVARCHAR(500),
+            @skip_dup   BIT,
+            @tgt        NVARCHAR(300),
+            @sql        NVARCHAR(MAX),
+            @err        NVARCHAR(2048),
+            @rej        NVARCHAR(MAX),
+            @key_list   NVARCHAR(MAX),
+            @on         NVARCHAR(MAX),
+            @set        NVARCHAR(MAX),
+            @staged     INT = 0,
+            @rejected   INT = 0,
+            @dup_files  INT = 0,
+            @dup_rows   INT = 0,
+            @collapsed  INT = 0,
+            @ins        INT = 0,
+            @upd        INT = 0,
+            @del        INT = 0,
+            @dup_names  NVARCHAR(2000),
+            @msg        NVARCHAR(4000);
 
-    SELECT @schema = TARGET_SCHEMA, @table = TARGET_TABLE, @op = LOAD_OPERATION,
-           @keys = KEY_COLUMNS, @skipdup = SKIP_DUPLICATE_FILE
-    FROM   MATMAS.CTL_MATMAS_ROUTE WHERE ROUTE_ID = @RouteId;
+    SELECT @schema   = target_schema,
+           @table    = target_table,
+           @op       = load_operation,
+           @keys     = key_columns,
+           @skip_dup = skip_duplicate_file
+    FROM   cfg.matmas_route_config
+    WHERE  route_id = @route_id;
 
     BEGIN TRY
-        /* ---- 0. configuration checks ----------------------------------- */
+        /* ---- 0. configuration checks --------------------------------- */
         IF @op IS NULL
-        BEGIN SET @err = CONCAT('Route ', @RouteId, ' not found in MATMAS.CTL_MATMAS_ROUTE'); THROW 50101, @err, 1; END
+        BEGIN
+            SET @err = CONCAT('Route ', @route_id, ' not found in cfg.matmas_route_config');
+            THROW 50101, @err, 1;
+        END
 
         SET @tgt = QUOTENAME(@schema) + N'.' + QUOTENAME(@table);
         IF OBJECT_ID(@tgt, 'U') IS NULL
-        BEGIN SET @err = CONCAT('Target table ', @tgt, ' does not exist (create it with MATMAS.sp_MATMAS_CreateErpTable)'); THROW 50102, @err, 1; END
+        BEGIN
+            SET @err = CONCAT('Target table ', @tgt, ' does not exist (create it with matmas.sp_create_erp_table)');
+            THROW 50102, @err, 1;
+        END
 
-        DECLARE @biz TABLE (COL SYSNAME PRIMARY KEY, ORD INT, MAXLEN INT);
-        INSERT INTO @biz (COL, ORD) VALUES ('ERP_ITEM_NUMBER',1),('MATERIAL_DESCRIPTION',2),('PLANT_CODE',3),
-                                           ('SUPPLIER_PART_NUMBER',4),('SUPPLIER_NUMBER',5),('MANUFACTURING_PART_NUMBER',6);
+        DECLARE @biz TABLE (col SYSNAME PRIMARY KEY, ord INT, max_len INT);
+        INSERT INTO @biz (col, ord)
+        VALUES ('erp_item_number', 1), ('material_description', 2), ('plant_code', 3),
+               ('supplier_part_number', 4), ('supplier_number', 5), ('manufacturing_part_number', 6);
+
         -- every ERP table must have the template columns; capture their length (nvarchar bytes / 2)
-        IF EXISTS (SELECT 1 FROM @biz WHERE COL_LENGTH(@tgt, COL) IS NULL)
-           OR COL_LENGTH(@tgt, 'START_DATE') IS NULL OR COL_LENGTH(@tgt, 'END_DATE') IS NULL
-        BEGIN SET @err = CONCAT('Target table ', @tgt, ' does not have the MATMAS template columns'); THROW 50103, @err, 1; END
-        UPDATE @biz SET MAXLEN = CASE WHEN COL_LENGTH(@tgt, COL) = -1 THEN NULL ELSE COL_LENGTH(@tgt, COL) / 2 END;
+        IF EXISTS (SELECT 1 FROM @biz WHERE COL_LENGTH(@tgt, col) IS NULL)
+           OR COL_LENGTH(@tgt, 'start_date') IS NULL
+           OR COL_LENGTH(@tgt, 'end_date')   IS NULL
+        BEGIN
+            SET @err = CONCAT('Target table ', @tgt, ' does not have the matmas template columns');
+            THROW 50103, @err, 1;
+        END
+        UPDATE @biz SET max_len = CASE WHEN COL_LENGTH(@tgt, col) = -1 THEN NULL ELSE COL_LENGTH(@tgt, col) / 2 END;
 
-        DECLARE @k TABLE (COL SYSNAME, ORD INT);
-        INSERT INTO @k SELECT LTRIM(RTRIM(value)), ordinal FROM STRING_SPLIT(@keys, ',', 1) WHERE LTRIM(RTRIM(value)) <> '';
-        IF EXISTS (SELECT 1 FROM @k k WHERE NOT EXISTS (SELECT 1 FROM @biz b WHERE b.COL = k.COL))
-        BEGIN SET @err = CONCAT('KEY_COLUMNS of ', @RouteId, ' must be among the 6 business columns: ', @keys); THROW 50104, @err, 1; END
+        DECLARE @k TABLE (col SYSNAME, ord INT);
+        INSERT INTO @k (col, ord)
+        SELECT LOWER(LTRIM(RTRIM(value))), ordinal
+        FROM   STRING_SPLIT(@keys, ',', 1)
+        WHERE  LTRIM(RTRIM(value)) <> '';
+
+        IF EXISTS (SELECT 1 FROM @k k WHERE NOT EXISTS (SELECT 1 FROM @biz b WHERE b.col = k.col))
+        BEGIN
+            SET @err = CONCAT('key_columns of ', @route_id, ' must be among the 6 business columns: ', @keys);
+            THROW 50104, @err, 1;
+        END
         IF @op IN ('UPSERT','UPDATE','DELETE') AND NOT EXISTS (SELECT 1 FROM @k)
-        BEGIN SET @err = CONCAT('Operation ', @op, ' needs KEY_COLUMNS for route ', @RouteId); THROW 50105, @err, 1; END
+        BEGIN
+            SET @err = CONCAT('Operation ', @op, ' needs key_columns for route ', @route_id);
+            THROW 50105, @err, 1;
+        END
 
-        /* ---- 1. working set -------------------------------------------- */
+        /* ---- 1. working set ------------------------------------------ */
         CREATE TABLE #s (
-            STAGE_ID BIGINT, SOURCE_FILE_NAME NVARCHAR(500),
-            ERP_ITEM_NUMBER NVARCHAR(1000), MATERIAL_DESCRIPTION NVARCHAR(1000), PLANT_CODE NVARCHAR(1000),
-            SUPPLIER_PART_NUMBER NVARCHAR(1000), SUPPLIER_NUMBER NVARCHAR(1000), MANUFACTURING_PART_NUMBER NVARCHAR(1000),
-            START_DATE DATE, END_DATE DATE, REJECT_REASON NVARCHAR(500), IS_DUP_FILE BIT NOT NULL DEFAULT 0, RN INT);
+            stage_id                    BIGINT,
+            source_file_name            NVARCHAR(500),
+            erp_item_number             NVARCHAR(1000),
+            material_description        NVARCHAR(1000),
+            plant_code                  NVARCHAR(1000),
+            supplier_part_number        NVARCHAR(1000),
+            supplier_number             NVARCHAR(1000),
+            manufacturing_part_number   NVARCHAR(1000),
+            start_date                  DATE,
+            end_date                    DATE,
+            reject_reason               NVARCHAR(500),
+            is_dup_file                 BIT NOT NULL DEFAULT 0,
+            rn                          INT
+        );
 
-        INSERT INTO #s (STAGE_ID, SOURCE_FILE_NAME, ERP_ITEM_NUMBER, MATERIAL_DESCRIPTION, PLANT_CODE,
-                        SUPPLIER_PART_NUMBER, SUPPLIER_NUMBER, MANUFACTURING_PART_NUMBER, START_DATE, END_DATE)
-        SELECT STAGE_ID, SOURCE_FILE_NAME,
-               NULLIF(LTRIM(RTRIM(ERP_ITEM_NUMBER)), N''), NULLIF(LTRIM(RTRIM(MATERIAL_DESCRIPTION)), N''),
-               NULLIF(LTRIM(RTRIM(PLANT_CODE)), N''), NULLIF(LTRIM(RTRIM(SUPPLIER_PART_NUMBER)), N''),
-               NULLIF(LTRIM(RTRIM(SUPPLIER_NUMBER)), N''), NULLIF(LTRIM(RTRIM(MANUFACTURING_PART_NUMBER)), N''),
-               ISNULL(START_DATE, CAST(SYSUTCDATETIME() AS DATE)), ISNULL(END_DATE, CAST('9999-12-31' AS DATE))
-        FROM   MATMAS.MATERIAL_MASTER_STAGE
-        WHERE  RUN_ID = @RunId AND ROUTE_ID = @RouteId AND STAGE_STATUS = 'NEW';
+        INSERT INTO #s (stage_id, source_file_name, erp_item_number, material_description, plant_code,
+                        supplier_part_number, supplier_number, manufacturing_part_number, start_date, end_date)
+        SELECT stage_id,
+               source_file_name,
+               NULLIF(LTRIM(RTRIM(erp_item_number)),           N''),
+               NULLIF(LTRIM(RTRIM(material_description)),      N''),
+               NULLIF(LTRIM(RTRIM(plant_code)),                N''),
+               NULLIF(LTRIM(RTRIM(supplier_part_number)),      N''),
+               NULLIF(LTRIM(RTRIM(supplier_number)),           N''),
+               NULLIF(LTRIM(RTRIM(manufacturing_part_number)), N''),
+               ISNULL(start_date, CAST(SYSUTCDATETIME() AS DATE)),
+               ISNULL(end_date,   CAST('9999-12-31' AS DATE))
+        FROM   matmas.material_master_stage
+        WHERE  run_id       = @run_id
+          AND  route_id     = @route_id
+          AND  stage_status = 'NEW';
         SET @staged = @@ROWCOUNT;
 
         IF @staged = 0
         BEGIN
-            INSERT INTO MATMAS.CTL_MATMAS_RUN_LOG (RUN_ID, ROUTE_ID, EVENT, ROWS_STAGED, MESSAGE)
-            VALUES (@RunId, @RouteId, 'LOADED', 0, N'no staged rows (empty file?)');
+            INSERT INTO matmas.run_log (run_id, route_id, event, rows_staged, message)
+            VALUES (@run_id, @route_id, 'LOADED', 0, N'no staged rows (empty file?)');
             RETURN;
         END
 
         /* ---- 2. validation: mandatory = keys + target NOT NULL columns, lengths */
         SELECT @rej = STRING_AGG(CAST(r AS NVARCHAR(MAX)), N', ')
         FROM (
-            SELECT N'CASE WHEN ' + QUOTENAME(COL) + N' IS NULL THEN ''MISSING ' + COL + N''' END' AS r
-            FROM  (SELECT COL FROM @k UNION SELECT 'ERP_ITEM_NUMBER' UNION SELECT 'PLANT_CODE') m
+            SELECT N'CASE WHEN ' + QUOTENAME(col) + N' IS NULL THEN ''MISSING ' + col + N''' END' AS r
+            FROM  (SELECT col FROM @k UNION SELECT 'erp_item_number' UNION SELECT 'plant_code') m
             UNION ALL
-            SELECT N'CASE WHEN LEN(' + QUOTENAME(COL) + N') > ' + CAST(MAXLEN AS NVARCHAR(10))
-                 + N' THEN ''TOO LONG ' + COL + N''' END'
-            FROM  @biz WHERE MAXLEN IS NOT NULL
+            SELECT N'CASE WHEN LEN(' + QUOTENAME(col) + N') > ' + CAST(max_len AS NVARCHAR(10))
+                 + N' THEN ''TOO LONG ' + col + N''' END'
+            FROM  @biz
+            WHERE max_len IS NOT NULL
         ) x;
-        SET @sql = N'UPDATE #s SET REJECT_REASON = NULLIF(CONCAT_WS(''; '', ' + @rej + N', NULL), '''')';
+        SET @sql = N'UPDATE #s SET reject_reason = NULLIF(CONCAT_WS(''; '', ' + @rej + N', NULL), '''')';
         EXEC sp_executesql @sql;
 
         /* ---- 3. duplicate files (same content already applied for this route) */
-        CREATE TABLE #f (SOURCE_FILE_NAME NVARCHAR(500), FP VARCHAR(64), CNT INT, IS_DUP BIT NOT NULL DEFAULT 0);
-        INSERT INTO #f (SOURCE_FILE_NAME, FP, CNT)
-        SELECT SOURCE_FILE_NAME,
+        CREATE TABLE #f (
+            source_file_name  NVARCHAR(500),
+            fp                VARCHAR(64),
+            cnt               INT,
+            is_dup            BIT NOT NULL DEFAULT 0
+        );
+        INSERT INTO #f (source_file_name, fp, cnt)
+        SELECT source_file_name,
                CONVERT(VARCHAR(64), HASHBYTES('SHA2_256',
-                   STRING_AGG(CAST(CONCAT(ISNULL(ERP_ITEM_NUMBER,N''), N'|', ISNULL(MATERIAL_DESCRIPTION,N''), N'|',
-                                          ISNULL(PLANT_CODE,N''), N'|', ISNULL(SUPPLIER_PART_NUMBER,N''), N'|',
-                                          ISNULL(SUPPLIER_NUMBER,N''), N'|', ISNULL(MANUFACTURING_PART_NUMBER,N''))
-                                   AS NVARCHAR(MAX)), NCHAR(10)) WITHIN GROUP (ORDER BY STAGE_ID)), 2),
+                   STRING_AGG(CAST(CONCAT(ISNULL(erp_item_number, N''),      N'|', ISNULL(material_description, N''), N'|',
+                                          ISNULL(plant_code, N''),           N'|', ISNULL(supplier_part_number, N''), N'|',
+                                          ISNULL(supplier_number, N''),      N'|', ISNULL(manufacturing_part_number, N''))
+                                   AS NVARCHAR(MAX)), NCHAR(10)) WITHIN GROUP (ORDER BY stage_id)), 2),
                COUNT(*)
-        FROM   #s GROUP BY SOURCE_FILE_NAME;
+        FROM   #s
+        GROUP  BY source_file_name;
 
-        IF @skipdup = 'Y'
+        IF @skip_dup = 1
         BEGIN
-            UPDATE f SET IS_DUP = 1
+            UPDATE f
+            SET    is_dup = 1
             FROM   #f f
-            WHERE  EXISTS (SELECT 1 FROM MATMAS.CTL_MATMAS_FILE_HISTORY h WHERE h.ROUTE_ID = @RouteId AND h.FILE_FINGERPRINT = f.FP);
-            UPDATE s SET IS_DUP_FILE = 1 FROM #s s JOIN #f f ON f.SOURCE_FILE_NAME = s.SOURCE_FILE_NAME WHERE f.IS_DUP = 1;
-            SELECT @dupfiles = COUNT(*), @dupnames = LEFT(STRING_AGG(CAST(SOURCE_FILE_NAME AS NVARCHAR(MAX)), N', '), 2000)
-            FROM   #f WHERE IS_DUP = 1;
-            SELECT @duprows = COUNT(*) FROM #s WHERE IS_DUP_FILE = 1;
+            WHERE  EXISTS (SELECT 1 FROM matmas.file_history h
+                           WHERE  h.route_id = @route_id AND h.file_fingerprint = f.fp);
+
+            UPDATE s
+            SET    is_dup_file = 1
+            FROM   #s s
+            JOIN   #f f ON f.source_file_name = s.source_file_name
+            WHERE  f.is_dup = 1;
+
+            SELECT @dup_files = COUNT(*),
+                   @dup_names = LEFT(STRING_AGG(CAST(source_file_name AS NVARCHAR(MAX)), N', '), 2000)
+            FROM   #f
+            WHERE  is_dup = 1;
+
+            SELECT @dup_rows = COUNT(*) FROM #s WHERE is_dup_file = 1;
         END
 
         /* ---- 4. rows to apply: valid, not from a duplicate file, de-duplicated */
-        SELECT * INTO #a FROM #s WHERE REJECT_REASON IS NULL AND IS_DUP_FILE = 0;
+        SELECT * INTO #a FROM #s WHERE reject_reason IS NULL AND is_dup_file = 0;
 
-        ;WITH d AS (SELECT RN, ROW_NUMBER() OVER (PARTITION BY ERP_ITEM_NUMBER, MATERIAL_DESCRIPTION, PLANT_CODE,
-                                                  SUPPLIER_PART_NUMBER, SUPPLIER_NUMBER, MANUFACTURING_PART_NUMBER
-                                                  ORDER BY STAGE_ID) AS r FROM #a)
-        UPDATE d SET RN = r;
-        DELETE FROM #a WHERE RN > 1;                 -- exact duplicate lines
+        ;WITH d AS (
+            SELECT rn, ROW_NUMBER() OVER (PARTITION BY erp_item_number, material_description, plant_code,
+                                                       supplier_part_number, supplier_number, manufacturing_part_number
+                                          ORDER BY stage_id) AS r
+            FROM   #a
+        )
+        UPDATE d SET rn = r;
+        DELETE FROM #a WHERE rn > 1;                                -- exact duplicate lines
         SET @collapsed = @@ROWCOUNT;
 
-        SELECT @keylist = STRING_AGG(CAST(QUOTENAME(COL) AS NVARCHAR(MAX)), N', ') WITHIN GROUP (ORDER BY ORD),
-               @on      = STRING_AGG(CAST(N't.' + QUOTENAME(COL) + N' = s.' + QUOTENAME(COL) AS NVARCHAR(MAX)), N' AND ') WITHIN GROUP (ORDER BY ORD)
+        SELECT @key_list = STRING_AGG(CAST(QUOTENAME(col) AS NVARCHAR(MAX)), N', ') WITHIN GROUP (ORDER BY ord),
+               @on       = STRING_AGG(CAST(N't.' + QUOTENAME(col) + N' = s.' + QUOTENAME(col) AS NVARCHAR(MAX)), N' AND ') WITHIN GROUP (ORDER BY ord)
         FROM   @k;
 
         IF @op IN ('UPSERT','UPDATE','DELETE')
         BEGIN
             -- one row per key: the last one in the file wins
-            SET @sql = N';WITH d AS (SELECT RN, ROW_NUMBER() OVER (PARTITION BY ' + @keylist + N' ORDER BY STAGE_ID DESC) AS r FROM #a) UPDATE d SET RN = r';
+            SET @sql = N';WITH d AS (SELECT rn, ROW_NUMBER() OVER (PARTITION BY ' + @key_list
+                     + N' ORDER BY stage_id DESC) AS r FROM #a) UPDATE d SET rn = r';
             EXEC sp_executesql @sql;
-            DELETE FROM #a WHERE RN > 1;
+            DELETE FROM #a WHERE rn > 1;
             SET @collapsed += @@ROWCOUNT;
         END
 
-        SELECT @set = STRING_AGG(CAST(N't.' + QUOTENAME(b.COL) + N' = s.' + QUOTENAME(b.COL) AS NVARCHAR(MAX)), N', ') WITHIN GROUP (ORDER BY b.ORD)
-        FROM   @biz b WHERE NOT EXISTS (SELECT 1 FROM @k k WHERE k.COL = b.COL);
-        SET @set = CONCAT_WS(N', ', @set, N't.END_DATE = s.END_DATE', N't.SOURCE_FILE_NAME = s.SOURCE_FILE_NAME',
-                             N't.RUN_ID = @r', N't.UPDATED_TS = SYSUTCDATETIME()');   -- START_DATE kept on update
+        SELECT @set = STRING_AGG(CAST(N't.' + QUOTENAME(b.col) + N' = s.' + QUOTENAME(b.col) AS NVARCHAR(MAX)), N', ') WITHIN GROUP (ORDER BY b.ord)
+        FROM   @biz b
+        WHERE  NOT EXISTS (SELECT 1 FROM @k k WHERE k.col = b.col);
+        SET @set = CONCAT_WS(N', ', @set,
+                             N't.end_date = s.end_date',
+                             N't.source_file_name = s.source_file_name',
+                             N't.run_id = @r',
+                             N't.updated_ts = SYSUTCDATETIME()');      -- start_date is kept on update
 
-        DECLARE @cols NVARCHAR(MAX) = N'ERP_ITEM_NUMBER, MATERIAL_DESCRIPTION, PLANT_CODE, SUPPLIER_PART_NUMBER, SUPPLIER_NUMBER, MANUFACTURING_PART_NUMBER, START_DATE, END_DATE, SOURCE_FILE_NAME, RUN_ID';
-        DECLARE @vals NVARCHAR(MAX) = N's.ERP_ITEM_NUMBER, s.MATERIAL_DESCRIPTION, s.PLANT_CODE, s.SUPPLIER_PART_NUMBER, s.SUPPLIER_NUMBER, s.MANUFACTURING_PART_NUMBER, s.START_DATE, s.END_DATE, s.SOURCE_FILE_NAME, @r';
+        DECLARE @cols NVARCHAR(MAX) = N'erp_item_number, material_description, plant_code, supplier_part_number, supplier_number, '
+                                    + N'manufacturing_part_number, start_date, end_date, source_file_name, run_id';
+        DECLARE @vals NVARCHAR(MAX) = N's.erp_item_number, s.material_description, s.plant_code, s.supplier_part_number, s.supplier_number, '
+                                    + N's.manufacturing_part_number, s.start_date, s.end_date, s.source_file_name, @r';
 
         SET @sql = CASE @op
             WHEN 'INSERT' THEN
@@ -154,99 +243,117 @@ BEGIN
                 N'DELETE FROM ' + @tgt + N'; SET @d = @@ROWCOUNT; '
               + N'INSERT INTO ' + @tgt + N' (' + @cols + N') SELECT ' + @vals + N' FROM #a s; SET @i = @@ROWCOUNT;'
             WHEN 'UPSERT' THEN
-                N'CREATE TABLE #act (ACT NVARCHAR(10)); '
+                N'CREATE TABLE #act (act NVARCHAR(10)); '
               + N'MERGE ' + @tgt + N' AS t USING #a AS s ON ' + @on
               + N' WHEN MATCHED THEN UPDATE SET ' + @set
               + N' WHEN NOT MATCHED BY TARGET THEN INSERT (' + @cols + N') VALUES (' + @vals + N')'
               + N' OUTPUT $action INTO #act; '
-              + N'SELECT @i = SUM(CASE WHEN ACT = ''INSERT'' THEN 1 ELSE 0 END), @u = SUM(CASE WHEN ACT = ''UPDATE'' THEN 1 ELSE 0 END) FROM #act;'
+              + N'SELECT @i = SUM(CASE WHEN act = ''INSERT'' THEN 1 ELSE 0 END), '
+              + N'@u = SUM(CASE WHEN act = ''UPDATE'' THEN 1 ELSE 0 END) FROM #act;'
             WHEN 'UPDATE' THEN
                 N'UPDATE t SET ' + @set + N' FROM ' + @tgt + N' t JOIN #a s ON ' + @on + N'; SET @u = @@ROWCOUNT;'
             WHEN 'DELETE' THEN
                 N'DELETE t FROM ' + @tgt + N' t JOIN #a s ON ' + @on + N'; SET @d = @@ROWCOUNT;'
         END;
 
-        /* ---- 5. apply in one transaction -------------------------------- */
+        /* ---- 5. apply in one transaction ----------------------------- */
         BEGIN TRAN;
 
-        INSERT INTO MATMAS.MATERIAL_MASTER_REJECT (RUN_ID, ROUTE_ID, SOURCE_FILE_NAME, REJECT_REASON, ERP_ITEM_NUMBER,
-               MATERIAL_DESCRIPTION, PLANT_CODE, SUPPLIER_PART_NUMBER, SUPPLIER_NUMBER, MANUFACTURING_PART_NUMBER)
-        SELECT @RunId, @RouteId, SOURCE_FILE_NAME, REJECT_REASON, ERP_ITEM_NUMBER, MATERIAL_DESCRIPTION, PLANT_CODE,
-               SUPPLIER_PART_NUMBER, SUPPLIER_NUMBER, MANUFACTURING_PART_NUMBER
-        FROM   #s WHERE REJECT_REASON IS NOT NULL AND IS_DUP_FILE = 0;
+        INSERT INTO matmas.material_master_reject (run_id, route_id, source_file_name, reject_reason, erp_item_number,
+                    material_description, plant_code, supplier_part_number, supplier_number, manufacturing_part_number)
+        SELECT @run_id, @route_id, source_file_name, reject_reason, erp_item_number,
+               material_description, plant_code, supplier_part_number, supplier_number, manufacturing_part_number
+        FROM   #s
+        WHERE  reject_reason IS NOT NULL
+          AND  is_dup_file = 0;
         SET @rejected = @@ROWCOUNT;
 
-        EXEC sp_executesql @sql, N'@r VARCHAR(30), @i INT OUTPUT, @u INT OUTPUT, @d INT OUTPUT',
-                           @r = @RunId, @i = @ins OUTPUT, @u = @upd OUTPUT, @d = @del OUTPUT;
+        EXEC sp_executesql @sql,
+             N'@r VARCHAR(30), @i INT OUTPUT, @u INT OUTPUT, @d INT OUTPUT',
+             @r = @run_id, @i = @ins OUTPUT, @u = @upd OUTPUT, @d = @del OUTPUT;
 
-        INSERT INTO MATMAS.CTL_MATMAS_FILE_HISTORY (ROUTE_ID, FILE_FINGERPRINT, SOURCE_FILE_NAME, ROW_COUNT, RUN_ID)
-        SELECT @RouteId, FP, MIN(SOURCE_FILE_NAME), MIN(CNT), @RunId
+        INSERT INTO matmas.file_history (route_id, file_fingerprint, source_file_name, row_count, run_id)
+        SELECT @route_id, fp, MIN(source_file_name), MIN(cnt), @run_id
         FROM   #f f
-        WHERE  f.IS_DUP = 0
-          AND  NOT EXISTS (SELECT 1 FROM MATMAS.CTL_MATMAS_FILE_HISTORY h WHERE h.ROUTE_ID = @RouteId AND h.FILE_FINGERPRINT = f.FP)
-        GROUP  BY FP;
+        WHERE  f.is_dup = 0
+          AND  NOT EXISTS (SELECT 1 FROM matmas.file_history h
+                           WHERE  h.route_id = @route_id AND h.file_fingerprint = f.fp)
+        GROUP  BY fp;
 
-        UPDATE st SET STAGE_STATUS = CASE WHEN s.IS_DUP_FILE = 1 THEN 'DUPLICATE'
-                                          WHEN s.REJECT_REASON IS NOT NULL THEN 'REJECTED'
-                                          ELSE 'APPLIED' END
-        FROM   MATMAS.MATERIAL_MASTER_STAGE st JOIN #s s ON s.STAGE_ID = st.STAGE_ID;
+        UPDATE st
+        SET    stage_status = CASE WHEN s.is_dup_file = 1         THEN 'DUPLICATE'
+                                   WHEN s.reject_reason IS NOT NULL THEN 'REJECTED'
+                                   ELSE 'APPLIED' END
+        FROM   matmas.material_master_stage st
+        JOIN   #s s ON s.stage_id = st.stage_id;
 
         COMMIT;
 
         SET @msg = CONCAT(@op, ' into ', @tgt, ': staged=', @staged, ' inserted=', ISNULL(@ins,0), ' updated=', ISNULL(@upd,0),
                           ' deleted=', ISNULL(@del,0), ' rejected=', @rejected, ' duplicates_collapsed=', @collapsed,
-                          CASE WHEN @dupfiles > 0 THEN CONCAT(' skipped_duplicate_files=', @dupfiles, ' (', @dupnames, ')') ELSE '' END);
+                          CASE WHEN @dup_files > 0 THEN CONCAT(' skipped_duplicate_files=', @dup_files, ' (', @dup_names, ')') ELSE '' END);
 
-        IF @dupfiles > 0
-            INSERT INTO MATMAS.CTL_MATMAS_RUN_LOG (RUN_ID, ROUTE_ID, EVENT, FILE_COUNT, ROWS_STAGED, MESSAGE)
-            VALUES (@RunId, @RouteId, 'DUPLICATE_FILE', @dupfiles, @duprows,
-                    CONCAT(N'already loaded earlier, skipped: ', @dupnames));
+        IF @dup_files > 0
+            INSERT INTO matmas.run_log (run_id, route_id, event, file_count, rows_staged, message)
+            VALUES (@run_id, @route_id, 'DUPLICATE_FILE', @dup_files, @dup_rows,
+                    CONCAT(N'already loaded earlier, skipped: ', @dup_names));
 
-        INSERT INTO MATMAS.CTL_MATMAS_RUN_LOG (RUN_ID, ROUTE_ID, EVENT, FILE_COUNT, ROWS_STAGED, ROWS_INSERTED,
-                                               ROWS_UPDATED, ROWS_DELETED, ROWS_REJECTED, MESSAGE)
-        VALUES (@RunId, @RouteId, 'LOADED', (SELECT COUNT(*) FROM #f), @staged, ISNULL(@ins,0), ISNULL(@upd,0),
-                ISNULL(@del,0), @rejected, @msg);
+        INSERT INTO matmas.run_log (run_id, route_id, event, file_count, rows_staged, rows_inserted,
+                                    rows_updated, rows_deleted, rows_rejected, message)
+        VALUES (@run_id, @route_id, 'LOADED', (SELECT COUNT(*) FROM #f), @staged, ISNULL(@ins,0),
+                ISNULL(@upd,0), ISNULL(@del,0), @rejected, @msg);
     END TRY
     BEGIN CATCH
         IF @@TRANCOUNT > 0 ROLLBACK;
         SET @msg = LEFT(CONCAT('ERROR ', ERROR_NUMBER(), ' line ', ERROR_LINE(), ': ', ERROR_MESSAGE()), 4000);
-        UPDATE MATMAS.MATERIAL_MASTER_STAGE SET STAGE_STATUS = 'FAILED'
-        WHERE  RUN_ID = @RunId AND ROUTE_ID = @RouteId AND STAGE_STATUS = 'NEW';
-        INSERT INTO MATMAS.CTL_MATMAS_RUN_LOG (RUN_ID, ROUTE_ID, EVENT, ROWS_STAGED, MESSAGE)
-        VALUES (@RunId, @RouteId, 'APPLY_FAILED', @staged, @msg);
+
+        UPDATE matmas.material_master_stage
+        SET    stage_status = 'FAILED'
+        WHERE  run_id = @run_id AND route_id = @route_id AND stage_status = 'NEW';
+
+        INSERT INTO matmas.run_log (run_id, route_id, event, rows_staged, message)
+        VALUES (@run_id, @route_id, 'APPLY_FAILED', @staged, @msg);
         THROW;
     END CATCH
 END
 GO
 
 /* ---------------------------------------------------------------------
-   sp_MATMAS_ApplyStage - Post SQL of m_MATMAS_LOAD
+   matmas.sp_apply_stage - Post SQL of m_P2O_102_MATMAS_Load
    Safe under JDBC autocommit=false: commits the driver's open transaction
    (the mapping's inserts are complete) and restores the count on exit.
    --------------------------------------------------------------------- */
-CREATE OR ALTER PROCEDURE MATMAS.sp_MATMAS_ApplyStage
-    @RunId   VARCHAR(30) = NULL,
-    @RouteId VARCHAR(60) = NULL
+CREATE OR ALTER PROCEDURE matmas.sp_apply_stage
+    @run_id    VARCHAR(30) = NULL,
+    @route_id  VARCHAR(60) = NULL
 AS
 BEGIN
-    SET NOCOUNT ON; SET XACT_ABORT OFF;
+    SET NOCOUNT ON;
+    SET XACT_ABORT OFF;
+
     DECLARE @tc INT = @@TRANCOUNT;
     SET IMPLICIT_TRANSACTIONS OFF;
     WHILE @@TRANCOUNT > 0 COMMIT;
 
-    DECLARE @r VARCHAR(30), @rt VARCHAR(60), @fails INT = 0, @failed NVARCHAR(2000) = N'', @err NVARCHAR(2048);
+    DECLARE @r       VARCHAR(30),
+            @rt      VARCHAR(60),
+            @fails   INT = 0,
+            @failed  NVARCHAR(2000) = N'',
+            @err     NVARCHAR(2048);
 
     DECLARE c CURSOR LOCAL FAST_FORWARD FOR
-        SELECT DISTINCT RUN_ID, ROUTE_ID
-        FROM   MATMAS.MATERIAL_MASTER_STAGE
-        WHERE  STAGE_STATUS = 'NEW'
-          AND  (@RunId IS NULL OR RUN_ID = @RunId)
-          AND  (@RouteId IS NULL OR ROUTE_ID = @RouteId);
-    OPEN c; FETCH NEXT FROM c INTO @r, @rt;
+        SELECT DISTINCT run_id, route_id
+        FROM   matmas.material_master_stage
+        WHERE  stage_status = 'NEW'
+          AND  (@run_id   IS NULL OR run_id   = @run_id)
+          AND  (@route_id IS NULL OR route_id = @route_id);
+
+    OPEN c;
+    FETCH NEXT FROM c INTO @r, @rt;
     WHILE @@FETCH_STATUS = 0
     BEGIN
         BEGIN TRY
-            EXEC MATMAS.sp_MATMAS_ApplyRoute @r, @rt;
+            EXEC matmas.sp_apply_route @r, @rt;
         END TRY
         BEGIN CATCH
             IF @@TRANCOUNT > 0 ROLLBACK;
@@ -255,44 +362,53 @@ BEGIN
         END CATCH
         FETCH NEXT FROM c INTO @r, @rt;
     END
-    CLOSE c; DEALLOCATE c;
+    CLOSE c;
+    DEALLOCATE c;
 
     WHILE @@TRANCOUNT < @tc BEGIN TRAN;
 
     IF @fails > 0
     BEGIN
-        SET @err = LEFT(CONCAT('MATMAS apply failed for route(s): ', @failed, '. See MATMAS.CTL_MATMAS_RUN_LOG (event APPLY_FAILED).'), 2048);
+        SET @err = LEFT(CONCAT('matmas apply failed for route(s): ', @failed,
+                               '. See matmas.run_log (event APPLY_FAILED).'), 2048);
         THROW 50110, @err, 1;
     END
 END
 GO
 
 /* ---------------------------------------------------------------------
-   sp_MATMAS_ReapplyRun - retry after fixing the route configuration or
-   creating a missing target table. Only rows that FAILED are retried.
+   matmas.sp_reapply_run - retry after fixing the route config or creating
+   a missing target table. Only rows that FAILED are retried.
    --------------------------------------------------------------------- */
-CREATE OR ALTER PROCEDURE MATMAS.sp_MATMAS_ReapplyRun
-    @RunId   VARCHAR(30),
-    @RouteId VARCHAR(60)
+CREATE OR ALTER PROCEDURE matmas.sp_reapply_run
+    @run_id    VARCHAR(30),
+    @route_id  VARCHAR(60)
 AS
 BEGIN
     SET NOCOUNT ON;
-    UPDATE MATMAS.MATERIAL_MASTER_STAGE SET STAGE_STATUS = 'NEW'
-    WHERE  RUN_ID = @RunId AND ROUTE_ID = @RouteId AND STAGE_STATUS = 'FAILED';
+
+    UPDATE matmas.material_master_stage
+    SET    stage_status = 'NEW'
+    WHERE  run_id = @run_id AND route_id = @route_id AND stage_status = 'FAILED';
     PRINT CONCAT(@@ROWCOUNT, ' row(s) reset to NEW');
-    EXEC MATMAS.sp_MATMAS_ApplyStage @RunId, @RouteId;
+
+    EXEC matmas.sp_apply_stage @run_id, @route_id;
 END
 GO
 
 /* ---------------------------------------------------------------------
-   sp_MATMAS_LogEvent - manual event (CDI writes the same table directly)
+   matmas.sp_log_event - manual event (CDI writes the same table directly)
    --------------------------------------------------------------------- */
-CREATE OR ALTER PROCEDURE MATMAS.sp_MATMAS_LogEvent
-    @RunId VARCHAR(30), @RouteId VARCHAR(60), @Event VARCHAR(30), @Message NVARCHAR(4000) = NULL, @FileCount INT = NULL
+CREATE OR ALTER PROCEDURE matmas.sp_log_event
+    @run_id      VARCHAR(30),
+    @route_id    VARCHAR(60),
+    @event       VARCHAR(30),
+    @message     NVARCHAR(4000) = NULL,
+    @file_count  INT            = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
-    INSERT INTO MATMAS.CTL_MATMAS_RUN_LOG (RUN_ID, ROUTE_ID, EVENT, FILE_COUNT, MESSAGE)
-    VALUES (@RunId, @RouteId, @Event, @FileCount, @Message);
+    INSERT INTO matmas.run_log (run_id, route_id, event, file_count, message)
+    VALUES (@run_id, @route_id, @event, @file_count, @message);
 END
 GO
