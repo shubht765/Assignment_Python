@@ -11,8 +11,8 @@ MERGE MATMAS.CTL_MATMAS_SETTING AS t
 USING (VALUES
  ('ONELAKE_CONNECTION', N'FABRIC.AMCOR.ONELAKE.P2O',
   N'IDMC connection, type Microsoft Fabric OneLake, workspace ws_p2o_intg_dev'),
- ('ONELAKE_ROOT',       N'/lh_p2o_intg_dev/Files/erp_to_matmas',
-  N'Root of the MATMAS folders in lakehouse lh_p2o_intg_dev. Use the same path format as the Target Directory of fi_P2O_000_BPDWFS_PO_to_OneLake'),
+ ('ONELAKE_ROOT',       N'lh_p2o_intg_dev/Files/erp_to_matmas',
+  N'Root of the MATMAS folders in lakehouse lh_p2o_intg_dev. Same format as fi_P2O_000_BPDWFS_GR_to_OneLake (no leading slash)'),
  ('CENTRAL_RUNTIME_ENV', N'US.US02.01', N'Agent group that runs the 4 mapping tasks and the OneLake move task')
 ) AS s (SETTING_NAME, SETTING_VALUE, DESCRIPTION)
 ON t.SETTING_NAME = s.SETTING_NAME

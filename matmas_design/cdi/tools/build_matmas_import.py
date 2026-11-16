@@ -31,13 +31,13 @@ AG = {"US.US02.01": ("9Nsrpw4jLaMha1GCSorpO0", "018Z0P2500000000000A"),
       "US.AMCOR.01": ("352BnvZuQA6iHi8ToR3t4Z", "018Z0P2500000000001P")}
 CENTRAL_AG = "US.US02.01"
 ONELAKE_NAME = "FABRIC.AMCOR.ONELAKE.P2O"
-ONELAKE_ROOT = "/lh_p2o_intg_dev/Files/erp_to_matmas"
+ONELAKE_ROOT = "lh_p2o_intg_dev/Files/erp_to_matmas"   # format of the org's own fi_P2O_000 task
+ONELAKE_LAKEHOUSE_PATH = "lh_p2o_intg_dev/Files"           # lakehousePath of connection FABRIC.AMCOR.ONELAKE.P2O
+ONELAKE_INTERNAL_NAME = "zzz_FABRIC.AMCOR.ONELAKE.P2O"    # name used inside the org's MI_TASK files
 
 GUESSES = [
     "Ingestion Task step override paths CATEGORYGeneral/runtimeEnvironment, CATEGORYSource/sourceDirectory, "
     "CATEGORYTarget/oneLakeTargetLocation (pattern of the published CATEGORYSource/filePattern and CATEGORYTarget/s3TargetLocation)",
-    "Ingestion Task step connection-type constant 'Fabric OneLake' (value used inside MI_TASK files)",
-    "OneLake connection GUID / repo handle (pass --onelake-guid / --onelake-handle from any export that includes FABRIC.AMCOR.ONELAKE.P2O)",
     "Taskflow: jumpTo and nested decisions placed inside a decision branch (UI allows it; no public sample of this exact nesting)",
     "Load mapping OneLake source adapter (no public mapping reads OneLake): confirm connection, folder read and format after import",
 ]
@@ -296,7 +296,7 @@ def m_load(name, onelake_guid):
     m = M(name, "MATMAS: OneLake run folder -> 6 file fields + RUN/ROUTE/START_DATE/END_DATE -> stage; Post SQL applies to the ERP table.")
     for p, d in (("RUN_ID", ""), ("ROUTE_ID", ""), ("SRC_DIRECTORY", ""), ("START_DATE_VALUE", ""), ("END_DATE_VALUE", "9999-12-31")):
         m.variable(p, default=d)
-    s_ = m.source("src_OneLakeFiles", onelake_guid, ONELAKE_ROOT + "/landing/JDE/_design/JDE_MATMAS_20261116.txt",
+    s_ = m.source("src_OneLakeFiles", onelake_guid, "erp_to_matmas/landing/JDE/_design/JDE_MATMAS_20261116.txt",
                   [(n, "string", 1000, nat) for n, nat in HEADER], x=100)
     fields = [("RUN_ID", "OUTPUT", "string", 30, "$$RUN_ID"), ("ROUTE_ID", "OUTPUT", "string", 60, "$$ROUTE_ID"),
               ("SOURCE_FILE_NAME", "OUTPUT", "string", 500, "$$SRC_DIRECTORY"),
@@ -421,24 +421,23 @@ def mtt(name, mt_guid, m_guid, m, params):
 
 
 def mi_task(name, mi_guid, ag_name, src, tgt, src_path, pattern, tgt_path, delete, onelake, handle):
+    """Same keys and order as the org's own export of fi_P2O_000_BPDWFS_GR_to_OneLake.MI_TASK.dat."""
     def conn(kind):
-        return {"type": "local", "name": "", "connId": ""} if kind == "local" else \
-               {"type": "Fabric OneLake", "name": ONELAKE_NAME, "connId": onelake[1]}
-    t_opts = {"fileExistsAction": "OVERWRITE"}
-    if tgt == "local":
-        t_opts["tgt.download.path"] = tgt_path
-    else:
-        t_opts.update({"oneLakeTargetLocation": tgt_path, "compression": "None"})
-    d = {"orgId": ORG_ID, "icsGuid": mi_guid, "name": name, "id": int(handle), "description": "MATMAS - generated", "sourceType": "CONNECTION",
-         "sourceConnection": conn(src), "targetConnection": conn(tgt), "taskActions": [], "lastModified": now_ms(),
-         "sourceOptions": {"filePatternFilter": "true", "src.file.pattern": pattern, "src.file.delete": delete,
-                           "src.download.path": src_path, "filePickupOption": "PATTERN", "srcPushdownCopy": "false",
-                           "src.file.pattern.type": "WILDCARD", "batchSize": "5", "fileStability": "false"},
-         "targetOptions": t_opts, "agentGroup": AG[ag_name][1], "job": "", "schedule": "", "fileListener": None,
-         "fileListenerName": None, "fileListenerAction": None, "emailIds": None, "filePickupOption": "PATTERN",
-         "lastRun": None, "threadCount": 1, "logLevel": "NORMAL", "allowConcurrency": True, "identifier": handle,
-         "fileListenerAsSource": False, "fileListenerAsTrigger": False}
-    return json.dumps(d, indent=1).encode()
+        if kind == "local":
+            return {"type": "local", "name": "", "displayName": None, "connId": ""}
+        return {"type": "Fabric OneLake", "name": ONELAKE_INTERNAL_NAME, "displayName": None, "connId": onelake[1]}
+    src_opts = {"filePatternFilter": "true", "src.file.pattern": pattern, "src.file.delete": delete,
+                "src.download.path": src_path, "filePickupOption": "PATTERN", "srcPushdownCopy": "false",
+                "src.file.pattern.type": "WILDCARD", "batchSize": "5", "fileStability": "false"}
+    tgt_opts = ({"oneLakeTargetLocation": tgt_path, "compression": "None", "fileExistsAction": "OVERWRITE"} if tgt != "local"
+                else {"fileExistsAction": "OVERWRITE", "tgt.download.path": tgt_path})
+    d = {"orgId": ORG_ID, "icsGuid": mi_guid, "name": name, "id": int(handle), "description": "MATMAS - generated",
+         "sourceType": "CONNECTION", "sourceConnection": conn(src), "targetConnection": conn(tgt), "taskActions": [],
+         "lastModified": now_ms(), "sourceOptions": src_opts, "targetOptions": tgt_opts, "agentGroup": AG[ag_name][1],
+         "job": "", "schedule": None, "fileListener": None, "fileListenerName": None, "fileListenerAction": None,
+         "emailIds": None, "filePickupOption": "PATTERN", "lastRun": None, "threadCount": 1, "logLevel": "NORMAL",
+         "allowConcurrency": False, "fileListenerAsSource": False, "fileListenerAsTrigger": False, "identifier": handle}
+    return json.dumps(d, separators=(",", ":")).encode()
 
 
 # ================================================================== taskflow (xml) builder
@@ -596,7 +595,7 @@ def build_taskflow(tf_name, tf_guid, ids):
     oc = "$temp.DT_Outcome[1]/inout[1]/OUTCOME"
 
     files_branch = [
-        D("DT_Load", "load", [("RUN_ID", "$temp.RUN_ID"), ("ROUTE_ID", "$temp.ROUTE_ID"), ("SRC_DIRECTORY", "$temp.RUN_LANDING_DIR"),
+        D("DT_Load", "load", [("RUN_ID", "$temp.RUN_ID"), ("ROUTE_ID", "$temp.ROUTE_ID"), ("SRC_DIRECTORY", f"fn:substring-after($temp.RUN_LANDING_DIR, '{ONELAKE_LAKEHOUSE_PATH}/')"),
                               ("START_DATE_VALUE", "$temp.START_DATE_VALUE"), ("END_DATE_VALUE", "$temp.END_DATE_VALUE")], ignore=True),
         D("DT_Outcome", "outcome", [("RUN_ID", "$temp.RUN_ID"), ("ROUTE_ID", "$temp.ROUTE_ID"), ("OUTCOME", "''")], ["OUTCOME"], ignore=True),
         A("TakeOutcome", [("temp.OUTCOME", f"if (string({oc}) = '') then 'ERROR' else string({oc})"),
@@ -693,8 +692,8 @@ def build_taskflow(tf_name, tf_guid, ids):
 # ================================================================== main
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--onelake-guid", default="oNeLaKe0P2o0MaTmAs0000")
-    ap.add_argument("--onelake-handle", default="018Z0P0B0000000000XX")
+    ap.add_argument("--onelake-guid", default="aHJH3tHOCgJj59wmDtIsKs")
+    ap.add_argument("--onelake-handle", default="018Z0P0B0000000000D0")
     ap.add_argument("--out", default=os.path.join(HERE, "..", "import", "MATMAS_CDI_Import.zip"))
     ap.add_argument("--no-taskflow", action="store_true",
                     help="Part 1: only mappings, mapping tasks and their connections / agent groups")
@@ -741,19 +740,19 @@ def main():
              "connectorGuid": "com.informatica.adapter.jdbc_v2", "isRtAttrsRefreshRequired": False, "connectorStatus": "ACTIVE"}]
     files[f"SYS/{JDBC_NAME}.Connection.zip"] = conn_zip(jdbc)
     entry(JDBC_GUID, JDBC_NAME, "Connection", "/SYS", [AG["US.US02.01"][0]], state="COMPLETE", desc=None, repo="018Z0P0B0000000000D5")
-    ol = [{"@type": "connection", "id": "@1", "name": ONELAKE_NAME, "description": "Microsoft Fabric OneLake (P2O)",
-           "runtimeEnvironmentId": "@" + AG[CENTRAL_AG][0], "instanceName": "MicrosoftFabricOneLake",
-           "instanceDisplayName": "Microsoft Fabric OneLake", "type": "TOOLKIT_CCI", "baseType": "TOOLKIT", "subType": "TOOLKIT_CCI",
-           "port": -1, "timeout": 60,
-           "connParams": {"Workspace Name": "ws_p2o_intg_dev", "Client ID": "7730fa35-0f7f-4e05-b58c-aee7d165f4a3",
-                          "Tenant ID": "fe9c207f-da30-4226-82b5-bff6ef031c8c", "Client Secret": "",
-                          "agentId": "018Z0P08000000000004", "agentGroupId": AG[CENTRAL_AG][1], "orgId": "018Z0P"},
+    ol = [{"@type": "connection", "id": "@1", "name": ONELAKE_NAME, "description": "", "runtimeEnvironmentId": "@" + AG["US.US02.01"][0],
+           "instanceName": "Microsoft OneLake", "instanceDisplayName": "Microsoft Fabric OneLake", "shortDescription": "",
+           "type": "TOOLKIT_CCI", "baseType": "TOOLKIT", "subType": "TOOLKIT_CCI", "port": 0,
+           "majorUpdateTime": "2026-07-31T04:46:51.000Z", "timeout": 60,
+           "connParams": {"agentId": "018Z0P08000000000004", "clientID": "7730fa35-0f7f-4e05-b58c-aee7d165f4a3",
+                          "agentGroupId": AG["US.US02.01"][1], "lakehousePath": ONELAKE_LAKEHOUSE_PATH,
+                          "tenantID": "fe9c207f-da30-4226-82b5-bff6ef031c8c", "workspaceName": "ws_p2o_intg_dev", "clientSecret": "",
+                          "authenticationType": "Service Principal Authentication", "endPointSuffix": "fabric.microsoft.com", "orgId": "018Z0P"},
            "internal": False, "federatedId": onelake[0], "retryNetworkError": False, "supportsCCIMultiGroup": False,
            "metadataBrowsable": True, "supportLabels": True, "vaultEnabled": False, "vaultEnabledParams": [],
-           "isRtAttrsRefreshRequired": False, "connectorStatus": "ACTIVE"}]
+           "connectorGuid": "com.informatica.adapter.onelake", "isRtAttrsRefreshRequired": False, "connectorStatus": "ACTIVE"}]
     files[f"SYS/{ONELAKE_NAME}.Connection.zip"] = conn_zip(ol)
-    entry(onelake[0], ONELAKE_NAME, "Connection", "/SYS", [AG[CENTRAL_AG][0]], state="COMPLETE", desc="Microsoft Fabric OneLake (P2O)",
-          repo=onelake[1])
+    entry(onelake[0], ONELAKE_NAME, "Connection", "/SYS", [AG["US.US02.01"][0]], state="COMPLETE", desc="", repo=onelake[1])
     for agn, created in (("US.US02.01", "2021-09-22T09:59:40.000Z"), ("US.AMCOR.01", "2026-06-25T15:38:08.000Z")):
         rj = [{"@type": "runtimeEnvironment", "id": "@1", "name": agn, "isSystemAgentGroup": False, "isShared": False,
                "federatedId": AG[agn][0], "createTimeUTC": created, "updateTimeUTC": created}]
@@ -787,8 +786,8 @@ def main():
             for k, (agn, s_, tg_, sp_, pat, tp_, dele) in mi_defs.items():
                 handle = str(MI_HANDLE[k])
                 files[f"Explore/{PROJECT}/{MI[k]}.MI_TASK.dat"] = mi_task(MI[k], G[k], agn, s_, tg_, sp_, pat, tp_, dele, onelake, handle)
-                refs = [AG[agn][0]] + ([onelake[0]] if "onelake" in (s_, tg_) else [])
-                entry(G[k], MI[k], "MI_TASK", PATH, refs, ctype="Binary", major=1, ctx=False, repo=handle)
+                refs = ([onelake[0]] if "onelake" in (s_, tg_) else []) + [AG[agn][0]]
+                entry(G[k], MI[k], "MI_TASK", PATH, refs, ctype=None, major=1, ctx=False, repo=handle)
         ids = {"reader": (f"mt_{N['reader']}", G["reader_t"]), "load": (f"mt_{N['load']}", G["load_t"]),
                "outcome": (f"mt_{N['outcome']}", G["outcome_t"]), "log": (f"mt_{N['log']}", G["log_t"]),
                "mi_collect": (MI["mi_collect"], G["mi_collect"]), "mi_move": (MI["mi_move"], G["mi_move"])}
@@ -800,7 +799,9 @@ def main():
     files["exportMetadata.v2.json"] = json.dumps({"name": pkg, "sourceOrgId": ORG_ID, "sourceOrgName": ORG_NAME,
                                                   "exportedObjects": manifest}, indent=2).encode()
     files[f"ContentsofExportPackage_{pkg}.csv"] = ("\n".join(csv) + "\n").encode()
-    lines = ["#", "#" + dt.datetime.now(dt.timezone.utc).strftime("%a %b %d %H:%M:%S UTC %Y")]
+    lines = ["#", "#" + dt.datetime.now(dt.timezone.utc).strftime("%a %b %d %H:%M:%S UTC %Y"),
+             "9BYDzwvqg1vfnGsPQcCRQb=B8F9765B666B7E9BC8E37292CD7EFB887580C48417A640AAA0BBFCBF76CD4CA4",
+             "5E2jEuhTW3jf1X2CWDEAMR=14806E1FA52980963C9431D25E3C9E2FFC233CA0A2CDE30123A88788F8E863E5"]   # fixed lines seen in every org export
     lines += [p.replace(" ", "\\ ") + "=" + hashlib.sha256(d).hexdigest().upper() for p, d in files.items()
               if not p.startswith("ContentsofExportPackage_")]
     files["exportPackage.chksum"] = ("\n".join(lines) + "\n").encode()
