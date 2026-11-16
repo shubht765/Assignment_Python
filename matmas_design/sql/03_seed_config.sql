@@ -13,10 +13,7 @@ USING (VALUES
   N'IDMC connection, type Microsoft Fabric OneLake, workspace ws_p2o_intg_dev'),
  ('ONELAKE_ROOT',       N'/lh_p2o_intg_dev/Files/erp_to_matmas',
   N'Root of the MATMAS folders in lakehouse lh_p2o_intg_dev. Use the same path format as the Target Directory of fi_P2O_000_BPDWFS_PO_to_OneLake'),
- ('CENTRAL_RUNTIME_ENV', N'US.US02.01', N'Agent group that runs the mapping tasks, the work-folder copy and CT_PrepWork / CT_ListWork'),
- ('WORK_DIR',           N'C:\Informatica\MATMAS\work', N'Work folder on the central agent (connection FF_MATMAS_WORK)'),
- ('ARCHIVE_SCRIPT_WIN', N'C:\Informatica\scripts\matmas_archive_source.cmd',
-  N'Same path on every Windows Secure Agent')
+ ('CENTRAL_RUNTIME_ENV', N'US.US02.01', N'Agent group that runs the 4 mapping tasks and the OneLake move task')
 ) AS s (SETTING_NAME, SETTING_VALUE, DESCRIPTION)
 ON t.SETTING_NAME = s.SETTING_NAME
 WHEN MATCHED THEN UPDATE SET SETTING_VALUE = s.SETTING_VALUE, DESCRIPTION = s.DESCRIPTION
@@ -28,8 +25,8 @@ WHEN NOT MATCHED THEN INSERT (SETTING_NAME, SETTING_VALUE, DESCRIPTION) VALUES (
 MERGE MATMAS.CTL_MATMAS_ROUTE AS t
 USING (VALUES
  -- ROUTE_ID,       ERP,      name,                       group,  order, runtime env,        source connection,   source directory (on that agent),        pattern,               agent archive dir,                       OneLake folder, target table,             operation, keys
- ('JDE_MATMAS',    'JDE',    N'JDE material master',     'DAILY', 10, N'US.US02.01',        N'LF_MATMAS_JDE',    N'D:\Interfaces\JDE\MATMAS\outbound',    N'JDE_MATMAS*.txt',    N'D:\Interfaces\JDE\MATMAS\archive',    N'JDE',    N'JDE_MATERIAL_MASTER',    'UPSERT', N'ERP_ITEM_NUMBER,PLANT_CODE,SUPPLIER_NUMBER,SUPPLIER_PART_NUMBER'),
- ('VISION_MATMAS', 'VISION', N'Vision material master',  'DAILY', 20, N'US.AMCOR.01',       N'LF_MATMAS_VISION', N'D:\Interfaces\VISION\MATMAS\outbound', N'VISION_MATMAS*.txt', N'D:\Interfaces\VISION\MATMAS\archive', N'Vision', N'VISION_MATERIAL_MASTER', 'UPSERT', N'ERP_ITEM_NUMBER,PLANT_CODE,SUPPLIER_NUMBER,SUPPLIER_PART_NUMBER'),
+ ('JDE_MATMAS',    'JDE',    N'JDE material master',     'DAILY', 10, N'US.US02.01',        N'LF_MATMAS_JDE',    N'D:\Interfaces\JDE\MATMAS\outbound',    N'JDE_MATMAS*.txt',    NULL,                                       N'JDE',    N'JDE_MATERIAL_MASTER',    'UPSERT', N'ERP_ITEM_NUMBER,PLANT_CODE,SUPPLIER_NUMBER,SUPPLIER_PART_NUMBER'),
+ ('VISION_MATMAS', 'VISION', N'Vision material master',  'DAILY', 20, N'US.AMCOR.01',       N'LF_MATMAS_VISION', N'D:\Interfaces\VISION\MATMAS\outbound', N'VISION_MATMAS*.txt', NULL,                                       N'Vision', N'VISION_MATERIAL_MASTER', 'UPSERT', N'ERP_ITEM_NUMBER,PLANT_CODE,SUPPLIER_NUMBER,SUPPLIER_PART_NUMBER'),
  ('SAP_MATMAS',    'SAP',    N'SAP material master',     'DAILY', 30, N'<SAP_AGENT_GROUP>', N'LF_MATMAS_SAP',    N'<SAP agent folder>',                       N'SAP_MATMAS*.txt',    NULL,                                       N'SAP',    N'SAP_MATERIAL_MASTER',    'UPSERT', N'ERP_ITEM_NUMBER,PLANT_CODE,SUPPLIER_NUMBER,SUPPLIER_PART_NUMBER')
 ) AS s (ROUTE_ID, ERP_SYSTEM, ROUTE_NAME, RUN_GROUP, RUN_ORDER, RUNTIME_ENVIRONMENT, SOURCE_CONNECTION, SOURCE_DIRECTORY,
         FILE_PATTERN, SOURCE_ARCHIVE_DIRECTORY, ONELAKE_FOLDER, TARGET_TABLE, LOAD_OPERATION, KEY_COLUMNS)

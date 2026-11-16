@@ -42,7 +42,7 @@ CREATE TABLE MATMAS.CTL_MATMAS_ROUTE (
     SOURCE_CONNECTION        NVARCHAR(100)  NOT NULL,   -- local folder / SFTP connection name in IDMC
     SOURCE_DIRECTORY         NVARCHAR(500)  NOT NULL,   -- folder on that agent
     FILE_PATTERN             NVARCHAR(200)  NOT NULL DEFAULT N'*.txt',
-    SOURCE_ARCHIVE_DIRECTORY NVARCHAR(500)  NULL,       -- where the agent-side file goes after a good load (NULL = no archive step)
+    SOURCE_ARCHIVE_DIRECTORY NVARCHAR(500)  NULL,       -- not used (the collect task deletes the agent file after copying it to OneLake)
     ONELAKE_FOLDER           NVARCHAR(100)  NOT NULL,   -- ERP sub-folder under erp_to_matmas/{landing,archive,duplicate,error}, e.g. JDE / Vision
     -- load: generic mapping + apply procedure
     TARGET_SCHEMA            SYSNAME        NOT NULL DEFAULT N'MATMAS',
@@ -277,6 +277,19 @@ GO
 CREATE OR ALTER VIEW stg.MATMAS_MATERIAL_MASTER_STAGE AS
 SELECT RUN_ID, ROUTE_ID, SOURCE_FILE_NAME, ERP_ITEM_NUMBER, MATERIAL_DESCRIPTION, PLANT_CODE,
        SUPPLIER_PART_NUMBER, SUPPLIER_NUMBER, MANUFACTURING_PART_NUMBER, START_DATE, END_DATE
+FROM   MATMAS.MATERIAL_MASTER_STAGE;
+GO
+-- target of m_P2O_102_MATMAS_Load: column names match the field names CDI derives from the file header
+-- (ERP Item Number -> ERP_Item_Number, Supplier Part# -> Supplier_Part_ ...), so field mapping is automatic.
+CREATE OR ALTER VIEW stg.MATMAS_STAGE_FILE AS
+SELECT RUN_ID, ROUTE_ID, SOURCE_FILE_NAME,
+       ERP_ITEM_NUMBER           AS ERP_Item_Number,
+       MATERIAL_DESCRIPTION      AS Material_Description,
+       PLANT_CODE                AS Plant_Code,
+       SUPPLIER_PART_NUMBER      AS Supplier_Part_,
+       SUPPLIER_NUMBER           AS Supplier_Number,
+       MANUFACTURING_PART_NUMBER AS Manufacturing_Part_,
+       START_DATE, END_DATE
 FROM   MATMAS.MATERIAL_MASTER_STAGE;
 GO
 -- one-row source of m_P2O_104_MATMAS_Log

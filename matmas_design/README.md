@@ -1,11 +1,11 @@
 # MATMAS – config-driven Material Master ingestion (Informatica CDI + OneLake + Fabric SQL)
 
-A scheduled cloud taskflow reads `MATMAS.CTL_MATMAS_ROUTE` row by row. For each row it copies the files from that row's Secure Agent folder into OneLake (`lh_p2o_intg_dev/Files/erp_to_matmas/landing/<ERP>`, connection `FABRIC.AMCOR.ONELAKE.P2O`) with one file ingestion task. It then loads them with one generic mapping, which adds Start Date and End Date to the 6 fields, into the ERP's own table, such as `MATMAS.JDE_MATERIAL_MASTER`. The operation comes from the config row. Finally it archives the source file on the agent.
+A scheduled cloud taskflow reads `MATMAS.CTL_MATMAS_ROUTE` row by row. For each row it copies the files from that row's Secure Agent folder into OneLake (`lh_p2o_intg_dev/Files/erp_to_matmas/landing/<ERP>`, connection `FABRIC.AMCOR.ONELAKE.P2O`) with one file ingestion task. It then loads them with one generic mapping, which adds Start Date and End Date to the 6 fields, into the ERP's own table, such as `MATMAS.JDE_MATERIAL_MASTER`. The operation comes from the config row. The collect task deletes the source file on the agent after copying it. The run folder in OneLake then moves to archive, duplicate or error.
 
 | Path | What it is |
 |---|---|
 | `01_MATMAS_Design.md` | Requirements, flow, objects, config columns, sample walk-through, decisions |
-| `cdi/import/MATMAS_CDI_Import.zip` | **Import package**: taskflow, 3 file ingestion tasks, 4 mappings and 4 mapping tasks, plus the work-folder connection |
+| `cdi/import/MATMAS_CDI_Import.zip` | **Import package**: taskflow, 2 file ingestion tasks, 4 mappings and 4 mapping tasks. No scripts and no new connections |
 | `cdi/IMPORT_README.md` | Import steps and the 10-minute post-import checklist |
 | `cdi/tools/build_matmas_import.py` | Regenerates the package. Every format is copied from real IDMC exports |
 | `cdi/CDI_Build_Guide.md` | Every CDI object with parameters, expressions and the taskflow step table |
@@ -14,8 +14,6 @@ A scheduled cloud taskflow reads `MATMAS.CTL_MATMAS_ROUTE` row by row. For each 
 | `sql/03_seed_config.sql` | JDE, Vision and SAP route rows. Replace the placeholder names |
 | `sql/04_test_without_cdi.sql` | SQL-only test of upsert, duplicate file, reject and retry, with expected results |
 | `sql/00_drop_all.sql` | DEV only: drops every object in schema MATMAS |
-| `agent_scripts/central/` | `matmas_work.cmd` and the design file for the central agent |
-| `agent_scripts/` | Archive script for the Command Task: `.cmd` and `.ps1` for Windows, `.sh` for Linux |
 | `samples/` | 6-field test files for JDE, Vision and SAP |
 | `fabric/nb_matmas_purge_landing.py` | Fabric notebook: removes copied run folders from `erp_to_matmas/landing` (only if the move task cannot delete) |
 
@@ -28,5 +26,4 @@ Run order:
 
 Verification status:
 - The SQL parses with a T-SQL parser. It has not been executed here, because no SQL Server is available.
-- The Linux archive script was tested: it archived the old file and left a file newer than the run start.
 - The import package was checked against real IDMC exports: checksums, internal references, property sets and taskflow links all verify. It has not been imported into IDMC yet. See `cdi/IMPORT_README.md` for the post-import checklist.

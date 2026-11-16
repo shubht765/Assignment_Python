@@ -1,85 +1,76 @@
 # MATMAS – import package `cdi/import/MATMAS_CDI_Import.zip`
 
-One zip with the whole CDI process for the material master. Import it into the Berry Global-Dev org, project `zPF_TCS_Shubham`.
+One zip with the whole CDI process for the material master. It has no scripts, no command tasks and no extra connections. Import it into project `zPF_TCS_Shubham` of the Berry Global-Dev org.
+
+## The flow
+
+For each row of `MATMAS.CTL_MATMAS_ROUTE`, the taskflow does the following.
+
+1. **Read the row.** `mt_P2O_101_MATMAS_Route_Reader` returns the agent group, source folder, file pattern, OneLake folders, target table and operation.
+2. **Collect.** `fi_P2O_100_MATMAS_Agent_to_OneLake` runs on the row's Secure Agent. It copies `<source folder>/<pattern>` to `erp_to_matmas/landing/<ERP>/<RUN_ID>` in OneLake, then **deletes the file on the agent**. The copy is kept in OneLake.
+3. **Check for files.** If nothing was found, it logs `NO_FILE` and moves to the next row.
+4. **Load.** `mt_P2O_102_MATMAS_Load` reads the run folder in OneLake, adds Start Date and End Date to the 6 fields, and writes the stage. Its Post SQL applies the rows to `MATMAS.<ERP>_MATERIAL_MASTER` with the row's operation.
+5. **Decide the outcome.** `mt_P2O_103_MATMAS_Outcome` returns ARCHIVE, DUPLICATE or ERROR.
+6. **Move.** `fi_P2O_101_MATMAS_OneLake_Move` moves `landing/<ERP>/<RUN_ID>` to `archive`, `duplicate` or `error/<ERP>/<RUN_ID>`.
+
+Every source and target comes from the config table and settings. The file ingestion steps move all the files.
 
 ## What is inside
 
-| Object | Type | Purpose |
-|---|---|---|
-| `tf_P2O_100_MATMAS_Orchestrator` | Taskflow | Loops over `MATMAS.CTL_MATMAS_ROUTE` and runs everything below per route |
-| `fi_P2O_100_MATMAS_Agent_to_OneLake` | File ingestion | The route's agent folder → `erp_to_matmas/landing/<ERP>/<RUN_ID>`. Runtime environment, folder and pattern come from the row. |
-| `fi_P2O_101_MATMAS_OneLake_to_Work` | File ingestion | That run folder → `C:\Informatica\MATMAS\work\inbox` on the central agent |
-| `fi_P2O_102_MATMAS_OneLake_Move` | File ingestion | Run folder → `archive`, `duplicate` or `error/<ERP>/<RUN_ID>`, then **deletes** it from landing |
-| `m_/mt_P2O_101_MATMAS_Route_Reader` | Mapping + task | Config row N → in-out parameters for the taskflow. Logs STARTED. |
-| `m_/mt_P2O_102_MATMAS_Load` | Mapping + task | Work-folder files → 6 fields plus START_DATE and END_DATE → stage. Post SQL applies to `MATMAS.<ERP>_MATERIAL_MASTER`. |
-| `m_/mt_P2O_103_MATMAS_Outcome` | Mapping + task | ARCHIVE, DUPLICATE or ERROR for this run |
-| `m_/mt_P2O_104_MATMAS_Log` | Mapping + task | Writes NO_FILE events |
-| `FF_MATMAS_WORK` | Connection, new | Flat file connection to `C:\Informatica\MATMAS\work` on `US.US02.01` |
+| Object | Type |
+|---|---|
+| `tf_P2O_100_MATMAS_Orchestrator` | Taskflow |
+| `fi_P2O_100_MATMAS_Agent_to_OneLake`, `fi_P2O_101_MATMAS_OneLake_Move` | File ingestion tasks |
+| `m_/mt_P2O_101_MATMAS_Route_Reader`, `_102_MATMAS_Load`, `_103_MATMAS_Outcome`, `_104_MATMAS_Log` | 4 mappings and 4 mapping tasks |
 
-**Not inside, on purpose.** The existing connections `jdbcv2.MSSQL.sqldb-p2o-intg.stg` and `FABRIC.AMCOR.ONELAKE.P2O`, and the agent groups, are only *referenced*. An import can therefore never overwrite them.
-
-## Why the files pass through a work folder
-
-A mapping task runs on one fixed agent, while the files arrive on different agents. So the flow is:
-
-1. The agent folder is copied to OneLake `landing`, using the row's runtime environment.
-2. The run folder is copied to the central agent's work folder.
-3. The load mapping reads it there as a standard flat file through a file list.
-4. The run folder in OneLake is moved to `archive`, `duplicate` or `error`.
-
-No local folder connections are needed on the source agents. The ingestion task reads the folder directly.
+The connections `jdbcv2.MSSQL.sqldb-p2o-intg.stg` and `FABRIC.AMCOR.ONELAKE.P2O`, and the agent groups, are only **referenced**. The import never overwrites them.
 
 ## How it was built
 
-Every object follows the exact structure of real IDMC exports:
-- **Your org's export `Mapping58`**: JDBC V2 target, connection references, org ids and agent groups.
-- **A public IDMC export** on GitHub, repository `dheeraj2112/ETL_INFA_IICS_Snowflake_Project`. It provided mapping tasks, Expression and Filter transformations, in-out parameters and flat-file sources.
-- **Public IDMC source-control repositories.** They provided file ingestion tasks, including one that reads and writes **Microsoft Fabric OneLake**. They also provided taskflows with decision, jump, assignment, Data Task with in-out parameters, Ingestion Task overrides, and a Command Task whose runtime environment comes from a field.
+The structure of each object is copied from real IDMC exports:
+- **Your org's export `Mapping58`.**
+- **A public IDMC export** in the GitHub repository `dheeraj2112/ETL_INFA_IICS_Snowflake_Project`. It supplied the mappings, mapping tasks, Expression and Filter transformations, and in-out parameters.
+- **Public IDMC source-control repositories.** They supplied file ingestion tasks with Microsoft Fabric OneLake as source and target, including the delete-after-transfer option. They also supplied taskflow steps: decision, jump, assignment, a Data Task with in-out parameters, and Ingestion Task overrides.
 
 Checks run on the package:
-- Every checksum verifies.
-- Every internal reference in each mapping resolves, and no ID is duplicated.
-- Every property set matches a real object of the same class.
-- Every taskflow link points to an existing step, and every XML element type also appears in real taskflows.
+- All checksums verify.
+- All internal references in each mapping resolve.
+- Each set of properties matches a real object of the same type.
+- Every taskflow link points to an existing step.
 
 ## Import steps
 
-1. **Database first.** Run `sql/01_tables.sql`, `sql/02_procedures.sql` and `sql/03_seed_config.sql`, then fill in the real agent groups, folders and patterns in `MATMAS.CTL_MATMAS_ROUTE`.
-2. **Central agent (`US.US02.01`)**:
-   - Create `C:\Informatica\MATMAS\work\inbox`.
-   - Copy `agent_scripts/central/JDE_MATMAS_20261116.txt` to `C:\Informatica\MATMAS\work\`. The load mapping uses it as its design file.
-   - Copy `agent_scripts/central/matmas_work.cmd` to `C:\Informatica\scripts\`.
-3. **Source agents**: copy `agent_scripts/matmas_archive_source.cmd` and `.ps1` to `C:\Informatica\scripts\`.
-4. **Import.** In IDMC go to Explore, then Import, and select `MATMAS_CDI_Import.zip`. Import all objects into `zPF_TCS_Shubham`.
-5. **Post-import checklist**, about 10 minutes, see below.
-6. Publish `tf_P2O_100_MATMAS_Orchestrator` and run it once with input `RUN_GROUP = DAILY`. Then schedule it.
+1. **Database.** Run `sql/01_tables.sql`, `sql/02_procedures.sql` and `sql/03_seed_config.sql`. Fill in the real agent groups, source folders and patterns in `MATMAS.CTL_MATMAS_ROUTE`.
+2. **Lakehouse `lh_p2o_intg_dev`.** Upload `samples/JDE/JDE_MATMAS_20261116.txt` to `Files/erp_to_matmas/landing/JDE/_design/`. It is the design file of the load mapping.
+3. **Import.** In IDMC, go to Explore, then Import, and select `MATMAS_CDI_Import.zip`. Import all objects into `zPF_TCS_Shubham`.
+4. **Post-import checklist.** It takes about 10 minutes and is described below.
+5. **Run.** Publish `tf_P2O_100_MATMAS_Orchestrator`, run it once with `RUN_GROUP = DAILY`, then schedule it.
 
 ## Post-import checklist
 
-These points could not be verified from any public sample. Check each one once.
+These settings have no public sample, so check each one once.
 
-1. **OneLake connection in the three `fi_P2O_*` tasks.** Open each task. If the Source or Target shows no connection, select `FABRIC.AMCOR.ONELAKE.P2O` and save.
-   - Alternatively, export `fi_P2O_000_BPDWFS_PO_to_OneLake` and send me the zip. It contains the connection's internal ids, and I'll regenerate the package so this step goes away:
-     ```
-     python3 cdi/tools/build_matmas_import.py --onelake-guid <id> --onelake-handle <handle>
-     ```
-2. **OneLake paths.** In `fi_P2O_100`, compare the Target location `/lh_p2o_intg_dev/Files/erp_to_matmas/landing/JDE` with the target path format in `fi_P2O_000_BPDWFS_PO_to_OneLake`. If the format differs, change `ONELAKE_ROOT` in `MATMAS.CTL_MATMAS_SETTING`. The taskflow takes the paths from there.
-3. **Ingestion step overrides.** Open the taskflow, click `IT_Collect` and look at **Input Fields**.
-   - Expected: Runtime Environment, Source Directory, File Pattern and the OneLake target location, all mapped from temp fields.
-   - If any shows as missing or red, remove it and add it again from the drop-down with the same formula. The formulas are listed in `CDI_Build_Guide.md`, section 9.
-   - Do the same for `IT_ToWork` (Source Directory) and `IT_Move` (Source Directory, Target location).
-4. **Command tasks.** `CT_PrepWork` and `CT_ListWork` run on `'US.US02.01'`. `CT_ArchiveSource` uses the row's runtime environment. Confirm the script paths `C:\Informatica\scripts\...` exist on those agents.
-5. **Load mapping source.** Open `mt_P2O_102_MATMAS_Load`, Source:
-   - It should show connection `FF_MATMAS_WORK`, object `matmas_filelist.txt`, source type **File list**, delimiter `|` and header line 1.
-   - If the fields don't show, re-select `JDE_MATMAS_20261116.txt` in the mapping, then switch the task back to the file list.
-6. Validate all four mappings and the taskflow, then publish the taskflow.
+1. **The load mapping's OneLake source.** No public export contains a mapping that reads OneLake. Open `m_P2O_102_MATMAS_Load`, select the source `src_OneLakeFiles`, and set:
+   - Connection `FABRIC.AMCOR.ONELAKE.P2O`. Object: the design file uploaded in import step 2.
+   - Formatting: delimited, delimiter `|`, no text qualifier, column names from the first line.
+   - Read the whole folder, using source type Directory or your connector's equivalent. Set the folder or directory override to **`$$SRC_DIRECTORY`**. The taskflow fills it with `landing/<ERP>/<RUN_ID>`.
+   - The six source fields should be named `ERP_Item_Number`, `Material_Description`, `Plant_Code`, `Supplier_Part_`, `Supplier_Number` and `Manufacturing_Part_`. The target view `MATMAS_STAGE_FILE` uses the same names, so field mapping is automatic. If CDI names them differently, map those fields by hand on the target.
+2. **The OneLake connection in both `fi_P2O_*` tasks.** If the source or target shows no connection, select `FABRIC.AMCOR.ONELAKE.P2O`.
+   - Alternatively, export `fi_P2O_000_BPDWFS_PO_to_OneLake` and send it to me. I'll regenerate the package with the connection's real IDs so this step goes away.
+3. **OneLake path format.** Compare the target location `/lh_p2o_intg_dev/Files/erp_to_matmas/landing/JDE` in `fi_P2O_100` with the format used in `fi_P2O_000_BPDWFS_PO_to_OneLake`. If the format differs, change `ONELAKE_ROOT` in `MATMAS.CTL_MATMAS_SETTING`.
+4. **Ingestion step overrides.** In the taskflow, check the Input Fields of each ingestion step:
+   - `IT_Collect`: Runtime Environment, Source Directory, File Pattern, OneLake target location.
+   - `IT_Move`: Source Directory, OneLake target location.
 
-## Run and check
+   If one shows as missing, add it again from the drop-down with the formula listed in `CDI_Build_Guide.md`, section 9.
+5. **Validate and publish.** Validate the 4 mappings and the taskflow, then publish.
+
+## Check a run
 
 ```sql
-SELECT * FROM MATMAS.V_MATMAS_RUN_STATUS ORDER BY RUN_ID DESC, ROUTE_ID;   -- last event per route
-SELECT * FROM MATMAS.JDE_MATERIAL_MASTER;                                  -- loaded data
-SELECT * FROM MATMAS.MATERIAL_MASTER_REJECT ORDER BY REJECT_ID DESC;       -- rejected rows
+SELECT * FROM MATMAS.V_MATMAS_RUN_STATUS ORDER BY RUN_ID DESC, ROUTE_ID;
+SELECT * FROM MATMAS.JDE_MATERIAL_MASTER;
+SELECT * FROM MATMAS.MATERIAL_MASTER_REJECT ORDER BY REJECT_ID DESC;
 ```
 
-A healthy route produces this event trail: `STARTED` → `LOADED` → `OUTCOME`. The OneLake run folder then sits in `archive/<ERP>/<RUN_ID>`, and the source file is in the agent archive folder.
+A healthy route produces the trail `STARTED` → `LOADED` → `OUTCOME`. The files then sit in `erp_to_matmas/archive/<ERP>/<RUN_ID>`, and the agent folder is empty.

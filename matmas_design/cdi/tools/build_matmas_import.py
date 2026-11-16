@@ -32,8 +32,6 @@ AG = {"US.US02.01": ("9Nsrpw4jLaMha1GCSorpO0", "018Z0P2500000000000A"),
 CENTRAL_AG = "US.US02.01"
 ONELAKE_NAME = "FABRIC.AMCOR.ONELAKE.P2O"
 ONELAKE_ROOT = "/lh_p2o_intg_dev/Files/erp_to_matmas"
-WORK_DIR = r"C:\Informatica\MATMAS\work"
-SCRIPT_DIR = r"C:\Informatica\scripts"
 
 GUESSES = [
     "Ingestion Task step override paths CATEGORYGeneral/runtimeEnvironment, CATEGORYSource/sourceDirectory, "
@@ -41,6 +39,7 @@ GUESSES = [
     "Ingestion Task step connection-type constant 'Fabric OneLake' (value used inside MI_TASK files)",
     "OneLake connection GUID / repo handle (pass --onelake-guid / --onelake-handle from any export that includes FABRIC.AMCOR.ONELAKE.P2O)",
     "Taskflow: jumpTo and nested decisions placed inside a decision branch (UI allows it; no public sample of this exact nesting)",
+    "Load mapping OneLake source adapter (no public mapping reads OneLake): confirm connection, folder read and format after import",
 ]
 
 STRING = "smd:com.informatica.metadata.seed.platform.Platform.typesystem/string"
@@ -257,7 +256,7 @@ def log_cols():
 
 
 READER_OUT = ["TOTAL_ROUTES", "ROUTE_ID", "ERP_SYSTEM", "RUNTIME_ENVIRONMENT", "SOURCE_DIRECTORY", "FILE_PATTERN",
-              "SOURCE_ARCHIVE_DIRECTORY", "ONELAKE_LANDING_DIR", "ONELAKE_ARCHIVE_DIR", "ONELAKE_DUPLICATE_DIR",
+              "ONELAKE_LANDING_DIR", "ONELAKE_ARCHIVE_DIR", "ONELAKE_DUPLICATE_DIR",
               "ONELAKE_ERROR_DIR", "TARGET_TABLE", "LOAD_OPERATION", "START_DATE_VALUE", "END_DATE_VALUE"]
 
 
@@ -288,30 +287,29 @@ def m_reader(name):
     return m
 
 
-def m_load(name, ff_guid):
-    m = M(name, "MATMAS: files of this run (file list) -> 6 fields + START_DATE/END_DATE -> stage; Post SQL applies to the ERP table.")
+HEADER = [("ERP_Item_Number", "ERP Item Number"), ("Material_Description", "Material Description"),
+          ("Plant_Code", "Plant Code"), ("Supplier_Part_", "Supplier Part#"), ("Supplier_Number", "Supplier Number"),
+          ("Manufacturing_Part_", "Manufacturing Part#")]   # field names as CDI derives them from the file header
+
+
+def m_load(name, onelake_guid):
+    m = M(name, "MATMAS: OneLake run folder -> 6 file fields + RUN/ROUTE/START_DATE/END_DATE -> stage; Post SQL applies to the ERP table.")
     for p, d in (("RUN_ID", ""), ("ROUTE_ID", ""), ("SRC_DIRECTORY", ""), ("START_DATE_VALUE", ""), ("END_DATE_VALUE", "9999-12-31")):
         m.variable(p, default=d)
-    hdr = [("SRC_ERP_ITEM_NUMBER", "ERP Item Number"), ("SRC_MATERIAL_DESCRIPTION", "Material Description"),
-           ("SRC_PLANT_CODE", "Plant Code"), ("SRC_SUPPLIER_PART_NUMBER", "Supplier Part#"),
-           ("SRC_SUPPLIER_NUMBER", "Supplier Number"), ("SRC_MANUFACTURING_PART_NUMBER", "Manufacturing Part#")]
-    s = m.source("src_MatmasFile", ff_guid, "JDE_MATMAS_20261116.txt", [(n, "string", 1000, nat) for n, nat in hdr],
-                 flat_file={"consecutiveDelimiter": "false", "delimiter": "|", "escapeChar": "", "firstDataRow": 2,
-                            "headerLineNo": 1, "multiDelimitersAsAnd": "true", "rowDelimiter": 0, "textQualifier": ""}, x=100)
-    blank = "IIF(ISNULL($$START_DATE_VALUE) OR LTRIM(RTRIM($$START_DATE_VALUE)) = ''"
+    s_ = m.source("src_OneLakeFiles", onelake_guid, ONELAKE_ROOT + "/landing/JDE/_design/JDE_MATMAS_20261116.txt",
+                  [(n, "string", 1000, nat) for n, nat in HEADER], x=100)
     fields = [("RUN_ID", "OUTPUT", "string", 30, "$$RUN_ID"), ("ROUTE_ID", "OUTPUT", "string", 60, "$$ROUTE_ID"),
-              ("SOURCE_FILE_NAME", "OUTPUT", "string", 500, "$$SRC_DIRECTORY")]
-    fields += [(n[4:], "OUTPUT", "string", 1000, f"LTRIM(RTRIM({n}))") for n, _ in hdr]
-    fields += [("START_DATE", "OUTPUT", "date", 29, f"{blank}, TRUNC(SESSSTARTTIME, 'DD'), TO_DATE($$START_DATE_VALUE, 'YYYY-MM-DD'))"),
-               ("END_DATE", "OUTPUT", "date", 29,
-                "TO_DATE(IIF(ISNULL($$END_DATE_VALUE) OR LTRIM(RTRIM($$END_DATE_VALUE)) = '', '9999-12-31', $$END_DATE_VALUE), 'YYYY-MM-DD')")]
+              ("SOURCE_FILE_NAME", "OUTPUT", "string", 500, "$$SRC_DIRECTORY"),
+              ("START_DATE", "OUTPUT", "date", 29,
+               "IIF(ISNULL($$START_DATE_VALUE) OR LTRIM(RTRIM($$START_DATE_VALUE)) = '', TRUNC(SESSSTARTTIME, 'DD'), TO_DATE($$START_DATE_VALUE, 'YYYY-MM-DD'))"),
+              ("END_DATE", "OUTPUT", "date", 29,
+               "TO_DATE(IIF(ISNULL($$END_DATE_VALUE) OR LTRIM(RTRIM($$END_DATE_VALUE)) = '', '9999-12-31', $$END_DATE_VALUE), 'YYYY-MM-DD')")]
     e = m.expression("exp_AddDates", fields, x=300)
-    f = m.filter("flt_NotBlank", "LENGTH(LTRIM(RTRIM(ERP_ITEM_NUMBER || MATERIAL_DESCRIPTION || PLANT_CODE || "
-                                 "SUPPLIER_PART_NUMBER || SUPPLIER_NUMBER || MANUFACTURING_PART_NUMBER))) > 0", x=500)
+    f = m.filter("flt_NotBlank", "LENGTH(LTRIM(RTRIM(" + " || ".join(n for n, _ in HEADER) + "))) > 0", x=500)
     cols = [("RUN_ID", "string", 30), ("ROUTE_ID", "string", 60), ("SOURCE_FILE_NAME", "string", 500)]
-    cols += [(n[4:], "string", 1000) for n, _ in hdr] + [("START_DATE", "date", 10), ("END_DATE", "date", 10)]
-    t = m.target("tgt_Stage", JDBC_GUID, "MATMAS_MATERIAL_MASTER_STAGE", cols, post_sql="EXEC MATMAS.sp_MATMAS_ApplyStage", x=700)
-    m.link(s, e); m.link(e, f); m.link(f, t)
+    cols += [(n, "string", 1000) for n, _ in HEADER] + [("START_DATE", "date", 10), ("END_DATE", "date", 10)]
+    t = m.target("tgt_Stage", JDBC_GUID, "MATMAS_STAGE_FILE", cols, post_sql="EXEC MATMAS.sp_MATMAS_ApplyStage", x=700)
+    m.link(s_, e); m.link(e, f); m.link(f, t)
     return m
 
 
@@ -573,7 +571,7 @@ class TF:
                 f'{self.lnk(nxt)}</container>')
 
 
-def build_taskflow(tf_name, tf_guid, ids, script_archive, script_work):
+def build_taskflow(tf_name, tf_guid, ids):
     t = TF()
     q = lambda s: "'" + s.replace("'", "''") + "'"
     # builder factories: each returns callable(own, nxt)
@@ -593,26 +591,18 @@ def build_taskflow(tf_name, tf_guid, ids, script_archive, script_work):
             ("temp.HAS_ROUTE", f"if (string({rd}ROUTE_ID) = '') then 0 else 1")]
     take += [(f"temp.{p}", f"string({rd}{p})") for p in READER_OUT[1:]]
     take += [("temp.RUN_LANDING_DIR", f"concat(string({rd}ONELAKE_LANDING_DIR), '/', $temp.RUN_ID)")]
-    central = q(CENTRAL_AG)
     outcome_dir = ("concat(if ($temp.OUTCOME = 'ARCHIVE') then $temp.ONELAKE_ARCHIVE_DIR else if ($temp.OUTCOME = 'DUPLICATE') "
                    "then $temp.ONELAKE_DUPLICATE_DIR else $temp.ONELAKE_ERROR_DIR, '/', $temp.RUN_ID)")
     oc = "$temp.DT_Outcome[1]/inout[1]/OUTCOME"
 
     files_branch = [
-        X("CT_PrepWork", central, script_work, "concat('clear ', $temp.RUN_ID)"),
-        I("IT_ToWork", "mi_work", "Fabric OneLake", "local", [("CATEGORYSource[1]/sourceDirectory", "$temp.RUN_LANDING_DIR")]),
-        X("CT_ListWork", central, script_work, "concat('list ', $temp.RUN_ID)"),
         D("DT_Load", "load", [("RUN_ID", "$temp.RUN_ID"), ("ROUTE_ID", "$temp.ROUTE_ID"), ("SRC_DIRECTORY", "$temp.RUN_LANDING_DIR"),
                               ("START_DATE_VALUE", "$temp.START_DATE_VALUE"), ("END_DATE_VALUE", "$temp.END_DATE_VALUE")], ignore=True),
         D("DT_Outcome", "outcome", [("RUN_ID", "$temp.RUN_ID"), ("ROUTE_ID", "$temp.ROUTE_ID"), ("OUTCOME", "''")], ["OUTCOME"], ignore=True),
         A("TakeOutcome", [("temp.OUTCOME", f"if (string({oc}) = '') then 'ERROR' else string({oc})"),
-                          ("temp.MOVE_TARGET_DIR", outcome_dir),
-                          ("temp.DO_ARCHIVE", "if ($temp.OUTCOME != 'ERROR' and $temp.SOURCE_ARCHIVE_DIRECTORY != '') then 1 else 0")]),
+                          ("temp.MOVE_TARGET_DIR", outcome_dir)]),
         I("IT_Move", "mi_move", "Fabric OneLake", "Fabric OneLake",
           [("CATEGORYSource[1]/sourceDirectory", "$temp.RUN_LANDING_DIR"), ("CATEGORYTarget[1]/oneLakeTargetLocation", "$temp.MOVE_TARGET_DIR")]),
-        DEC("Archive source?", "1", "$temp.DO_ARCHIVE", [
-            X("CT_ArchiveSource", "$temp.RUNTIME_ENVIRONMENT", script_archive,
-              "concat('\"', $temp.SOURCE_DIRECTORY, '\" \"', $temp.FILE_PATTERN, '\" \"', $temp.SOURCE_ARCHIVE_DIRECTORY, '\" ', $temp.RUN_ID)")]),
     ]
     route_branch = [
         I("IT_Collect", "mi_collect", "local", "Fabric OneLake",
@@ -637,7 +627,7 @@ def build_taskflow(tf_name, tf_guid, ids, script_archive, script_work):
 
     temps = "".join(f'<field description="" name="{n}" type="{ty}"><options><option name="required">false</option></options></field>'
                     for n, ty in [("RUN_ID", "string"), ("ROW_ID", "double"), ("TOTAL", "double"), ("HAS_ROUTE", "double"),
-                                  ("FILES", "double"), ("DO_ARCHIVE", "double"), ("OUTCOME", "string"), ("MOVE_TARGET_DIR", "string"),
+                                  ("FILES", "double"), ("OUTCOME", "string"), ("MOVE_TARGET_DIR", "string"),
                                   ("RUN_LANDING_DIR", "string")] + [(p, "string") for p in READER_OUT[1:]])
     pos = ""
     for po, kind in t.po.items():
@@ -710,15 +700,14 @@ def main():
     onelake = (a.onelake_guid, a.onelake_handle)
 
     G = {k: guid() for k in ("reader_m", "load_m", "outcome_m", "log_m", "reader_t", "load_t", "outcome_t", "log_t",
-                             "mi_collect", "mi_work", "mi_move", "tf", "ff_conn")}
+                             "mi_collect", "mi_move", "tf", "ff_conn")}
     N = {"reader": "P2O_101_MATMAS_Route_Reader", "load": "P2O_102_MATMAS_Load",
          "outcome": "P2O_103_MATMAS_Outcome", "log": "P2O_104_MATMAS_Log"}
-    MI = {"mi_collect": "fi_P2O_100_MATMAS_Agent_to_OneLake", "mi_work": "fi_P2O_101_MATMAS_OneLake_to_Work",
-          "mi_move": "fi_P2O_102_MATMAS_OneLake_Move"}
+    MI = {"mi_collect": "fi_P2O_100_MATMAS_Agent_to_OneLake", "mi_move": "fi_P2O_101_MATMAS_OneLake_Move"}
     TFN = "tf_P2O_100_MATMAS_Orchestrator"
     FF_NAME = "FF_MATMAS_WORK"
 
-    maps = {"reader": m_reader("m_" + N["reader"]), "load": m_load("m_" + N["load"], G["ff_conn"]),
+    maps = {"reader": m_reader("m_" + N["reader"]), "load": m_load("m_" + N["load"], onelake[0]),
             "outcome": m_outcome("m_" + N["outcome"]), "log": m_log("m_" + N["log"])}
     files, manifest, csv = {}, [], ["objectPath,objectName,objectType,id"]
 
@@ -729,17 +718,6 @@ def main():
                                       "additionalInfo": {"description": desc, "contentType": ctype, "documentState": state}}})
         csv.append(f"{path},{name},{otype},{guid_}")
 
-    # new flat-file connection for the central work folder (new asset: nothing in the org is overwritten)
-    ff = [{"@type": "connection", "id": "@1", "name": FF_NAME, "description": "MATMAS work folder on the central Secure Agent",
-           "runtimeEnvironmentId": "@" + AG[CENTRAL_AG][0], "instanceDisplayName": "CSVFile", "dateFormat": "yyyy-MM-dd",
-           "database": WORK_DIR, "codepage": "UTF-8", "shortDescription": "MATMAS work folder", "type": "CSVFile", "port": 0,
-           "timeout": 60, "connParams": {"agentId": "018Z0P08000000000004", "agentGroupId": AG[CENTRAL_AG][1], "orgId": "018Z0P"},
-           "internal": False, "federatedId": G["ff_conn"], "retryNetworkError": False, "supportsCCIMultiGroup": False,
-           "metadataBrowsable": True, "supportLabels": False, "vaultEnabled": False, "vaultEnabledParams": []}]
-    files[f"SYS/{FF_NAME}.Connection.zip"] = zbytes([("metadata.meta", dumps([{"@type": "objectRef", "id": "@1", "type": "connection"}])),
-                                                      ("connection.json", dumps(ff))])
-    entry(G["ff_conn"], FF_NAME, "Connection", "/SYS", [AG[CENTRAL_AG][0]], state="COMPLETE", desc="MATMAS work folder")
-
     with open(os.path.join(HERE, "ref", f"{PROJECT}.Project.json"), "rb") as f:
         files[f"Explore/{PROJECT}.Project.json"] = f.read()
     entry(PROJECT_GUID, PROJECT, "Project", "/Explore", [], ctype="Binary", state="COMPLETE", ctx=False, desc="TCS Consultant")
@@ -749,20 +727,14 @@ def main():
         files[f"Explore/{PROJECT}/m_{N[k]}.DTEMPLATE.zip"] = dtemplate(m, mg)
         entry(mg, f"m_{N[k]}", "DTEMPLATE", PATH, sorted(m.conns))
         src = next(t for t in m.tx if t["$$class"] == C["TmplSource"]); tgt = next(t for t in m.tx if t["$$class"] == C["TmplTarget"])
-        if k == "load":
-            sp = mt_param("SOURCE", src["name"], G["ff_conn"], "matmas_filelist.txt",
-                          {"isFileList": True, "srcFFAttrs": {"@type": "flatFileAttrs", "id": random.randint(10**7, 10**8),
-                           "delimiter": "|", "textQualifier": "none", "escapeChar": "", "headerLineNo": 1, "firstDataRow": 2,
-                           "rowDelimiter": 0, "consecutiveDelimiter": False, "multiDelimitersAsAnd": True}})
-        else:
-            sp = mt_param("SOURCE", src["name"], JDBC_GUID, src["dataAdapter"]["object"]["name"])
+        conn = onelake[0] if k == "load" else JDBC_GUID
+        sp = mt_param("SOURCE", src["name"], conn, src["dataAdapter"]["object"]["name"])
         tp = mt_param("TARGET", tgt["name"], JDBC_GUID, tgt["dataAdapter"]["object"]["name"])
         files[f"Explore/{PROJECT}/mt_{N[k]}.MTT.zip"] = mtt(f"mt_{N[k]}", tg, mg, m, [sp, tp])
         entry(tg, f"mt_{N[k]}", "MTT", PATH, sorted(m.conns | {AG[CENTRAL_AG][0], mg}))
 
     landing_jde = ONELAKE_ROOT + "/landing/JDE"
-    mi_defs = {"mi_collect": ("US.US02.01", "local", "onelake", r"D:\Interfaces\JDE\MATMAS\outbound", "JDE_MATMAS*.txt", landing_jde, "KEEP"),
-               "mi_work": (CENTRAL_AG, "onelake", "local", landing_jde, "*", WORK_DIR + r"\inbox", "KEEP"),
+    mi_defs = {"mi_collect": ("US.US02.01", "local", "onelake", r"D:\Interfaces\JDE\MATMAS\outbound", "JDE_MATMAS*.txt", landing_jde, "DELETE"),
                "mi_move": (CENTRAL_AG, "onelake", "onelake", landing_jde, "*", ONELAKE_ROOT + "/archive/JDE", "DELETE")}
     for k, (agn, s, tg_, sp_, pat, tp_, dele) in mi_defs.items():
         files[f"Explore/{PROJECT}/{MI[k]}.MI_TASK.dat"] = mi_task(MI[k], G[k], agn, s, tg_, sp_, pat, tp_, dele, onelake)
@@ -771,11 +743,10 @@ def main():
 
     ids = {"reader": (f"mt_{N['reader']}", G["reader_t"]), "load": (f"mt_{N['load']}", G["load_t"]),
            "outcome": (f"mt_{N['outcome']}", G["outcome_t"]), "log": (f"mt_{N['log']}", G["log_t"]),
-           "mi_collect": (MI["mi_collect"], G["mi_collect"]), "mi_work": (MI["mi_work"], G["mi_work"]),
-           "mi_move": (MI["mi_move"], G["mi_move"])}
-    tf_xml = build_taskflow(TFN, G["tf"], ids, SCRIPT_DIR + r"\matmas_archive_source.cmd", SCRIPT_DIR + r"\matmas_work.cmd")
+           "mi_collect": (MI["mi_collect"], G["mi_collect"]), "mi_move": (MI["mi_move"], G["mi_move"])}
+    tf_xml = build_taskflow(TFN, G["tf"], ids)
     files[f"Explore/{PROJECT}/{TFN}.TASKFLOW.xml"] = tf_xml
-    entry(G["tf"], TFN, "TASKFLOW", PATH, [G[k] for k in ("reader_t", "load_t", "outcome_t", "log_t", "mi_collect", "mi_work", "mi_move")],
+    entry(G["tf"], TFN, "TASKFLOW", PATH, [G[k] for k in ("reader_t", "load_t", "outcome_t", "log_t", "mi_collect", "mi_move")],
           ctype="application/json; charset=utf-8", major=1, ctx=False)
 
     pkg = f"MATMAS_CDI_Import-{now_ms()}"

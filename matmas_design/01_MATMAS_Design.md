@@ -28,17 +28,16 @@ Status: design v1.1 (16-Nov-2026). This replaces the earlier versions. Build ste
 ```
 tf_P2O_100_MATMAS_Orchestrator  (IDMC cloud, scheduled) - loop over MATMAS.CTL_MATMAS_ROUTE
  1 READ     mt_P2O_101_MATMAS_Route_Reader   config row N -> taskflow fields
- 2 COLLECT  fi_P2O_100_MATMAS_ERP_to_OneLake runs ON THE ROW'S AGENT (runtime env overridden)
-            agent folder/pattern -> erp_to_matmas/landing/<ERP>/<RUN_ID>      (0 files -> NO_FILE, next row)
+ 2 COLLECT  fi_P2O_100_MATMAS_Agent_to_OneLake runs ON THE ROW'S AGENT (runtime env overridden)
+            agent folder/pattern -> erp_to_matmas/landing/<ERP>/<RUN_ID>, then deletes the agent file (0 files -> NO_FILE)
  3 LOAD     mt_P2O_102_MATMAS_Load           landing/<ERP>/<RUN_ID> -> 6 fields + START/END_DATE -> stage
             Post SQL sp_MATMAS_ApplyStage    -> MATMAS.<ERP>_MATERIAL_MASTER with the row's operation
  4 OUTCOME  mt_P2O_103_MATMAS_Outcome        ARCHIVE | DUPLICATE | ERROR
- 5 MOVE     fi_P2O_101_MATMAS_OneLake_Move   landing/<ERP>/<RUN_ID> -> archive|duplicate|error/<ERP>/<RUN_ID>
- 6 ARCHIVE  Command Task ON THE ROW'S AGENT  source file -> agent archive folder (only when not ERROR)
+   MOVE     fi_P2O_101_MATMAS_OneLake_Move   landing/<ERP>/<RUN_ID> -> archive|duplicate|error/<ERP>/<RUN_ID>
  7 LOG      every step                        MATMAS.CTL_MATMAS_RUN_LOG
 ```
 
-**Why it works across agents**: the Ingestion Task step can override the **runtime environment**, connections, directories and file pattern, and the Command Task step takes its **runtime environment** from a field, so collect and agent-side archive run wherever the row says. The mapping tasks never need to switch agents because everything they read is in OneLake.
+**Why it works across agents**: the Ingestion Task step can override the **runtime environment**, connections, directories and file pattern, so collect runs on whichever agent the row names. The mapping tasks never need to switch agents because everything they read is in OneLake.
 
 ## 3. Database objects
 
