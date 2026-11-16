@@ -420,7 +420,7 @@ def mtt(name, mt_guid, m_guid, m, params):
     return zbytes([("metadata.meta", dumps([{"@type": "objectRef", "id": "@1", "type": "mtTask"}])), ("mtTask.json", dumps(task))])
 
 
-def mi_task(name, mi_guid, ag_name, src, tgt, src_path, pattern, tgt_path, delete, onelake):
+def mi_task(name, mi_guid, ag_name, src, tgt, src_path, pattern, tgt_path, delete, onelake, handle):
     def conn(kind):
         return {"type": "local", "name": "", "connId": ""} if kind == "local" else \
                {"type": "Fabric OneLake", "name": ONELAKE_NAME, "connId": onelake[1]}
@@ -429,14 +429,14 @@ def mi_task(name, mi_guid, ag_name, src, tgt, src_path, pattern, tgt_path, delet
         t_opts["tgt.download.path"] = tgt_path
     else:
         t_opts.update({"oneLakeTargetLocation": tgt_path, "compression": "None"})
-    d = {"orgId": ORG_ID, "icsGuid": mi_guid, "name": name, "id": 0, "description": "MATMAS - generated", "sourceType": "CONNECTION",
+    d = {"orgId": ORG_ID, "icsGuid": mi_guid, "name": name, "id": int(handle), "description": "MATMAS - generated", "sourceType": "CONNECTION",
          "sourceConnection": conn(src), "targetConnection": conn(tgt), "taskActions": [], "lastModified": now_ms(),
          "sourceOptions": {"filePatternFilter": "true", "src.file.pattern": pattern, "src.file.delete": delete,
                            "src.download.path": src_path, "filePickupOption": "PATTERN", "srcPushdownCopy": "false",
                            "src.file.pattern.type": "WILDCARD", "batchSize": "5", "fileStability": "false"},
          "targetOptions": t_opts, "agentGroup": AG[ag_name][1], "job": "", "schedule": "", "fileListener": None,
          "fileListenerName": None, "fileListenerAction": None, "emailIds": None, "filePickupOption": "PATTERN",
-         "lastRun": None, "threadCount": 1, "logLevel": "NORMAL", "allowConcurrency": True, "identifier": "0",
+         "lastRun": None, "threadCount": 1, "logLevel": "NORMAL", "allowConcurrency": True, "identifier": handle,
          "fileListenerAsSource": False, "fileListenerAsTrigger": False}
     return json.dumps(d, indent=1).encode()
 
@@ -693,7 +693,7 @@ def build_taskflow(tf_name, tf_guid, ids):
 # ================================================================== main
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--onelake-guid", default="ONELAKExxGUIDxxPLACEHLD")
+    ap.add_argument("--onelake-guid", default="oNeLaKe0P2o0MaTmAs0000")
     ap.add_argument("--onelake-handle", default="018Z0P0B0000000000XX")
     ap.add_argument("--out", default=os.path.join(HERE, "..", "import", "MATMAS_CDI_Import.zip"))
     a = ap.parse_args()
@@ -704,6 +704,7 @@ def main():
     N = {"reader": "P2O_101_MATMAS_Route_Reader", "load": "P2O_102_MATMAS_Load",
          "outcome": "P2O_103_MATMAS_Outcome", "log": "P2O_104_MATMAS_Log"}
     MI = {"mi_collect": "fi_P2O_100_MATMAS_Agent_to_OneLake", "mi_move": "fi_P2O_101_MATMAS_OneLake_Move"}
+    MI_HANDLE = {"mi_collect": 9810011, "mi_move": 9810012}   # numeric repo handles, like real MI tasks (high values to avoid clashes)
     TFN = "tf_P2O_100_MATMAS_Orchestrator"
     FF_NAME = "FF_MATMAS_WORK"
 
@@ -711,12 +712,49 @@ def main():
             "outcome": m_outcome("m_" + N["outcome"]), "log": m_log("m_" + N["log"])}
     files, manifest, csv = {}, [], ["objectPath,objectName,objectType,id"]
 
-    def entry(guid_, name, otype, path, refs, ctype="JSON", state="VALID", major=0, ctx=True, desc=""):
+    def entry(guid_, name, otype, path, refs, ctype="JSON", state="VALID", major=0, ctx=True, desc="", repo=None):
         manifest.append({"objectGuid": guid_, "objectName": name, "objectType": otype, "path": path, "providerName": None,
-                         "metadata": {"modelVersion": {"major": major, "minor": 0}, "repoInfo": None, "objectRefs": refs,
+                         "metadata": {"modelVersion": {"major": major, "minor": 0}, "repoInfo": ({"repoHandle": repo} if repo else None), "objectRefs": refs,
                                       "contextAttributes": [{"name": "id", "value": "@1"}] if ctx else [],
                                       "additionalInfo": {"description": desc, "contentType": ctype, "documentState": state}}})
         csv.append(f"{path},{name},{otype},{guid_}")
+
+    # ---- dependencies, exactly as the org's own export ships them. The import option
+    #      "overwrite existing assets, excluding connections and runtime environments" never overwrites these.
+    def conn_zip(cj):
+        return zbytes([("metadata.meta", dumps([{"@type": "objectRef", "id": "@1", "type": "connection"}])), ("connection.json", dumps(cj))])
+    jdbc = [{"@type": "connection", "id": "@1", "name": JDBC_NAME, "runtimeEnvironmentId": "@" + AG["US.US02.01"][0],
+             "instanceName": "JDBCV2", "instanceDisplayName": "JDBCV2", "type": "TOOLKIT_CCI", "baseType": "TOOLKIT",
+             "subType": "TOOLKIT_CCI", "port": -1, "timeout": 60,
+             "connParams": {"quoteChar": "None", "schemaname": "stg", "agentId": "018Z0P08000000000004", "retrycount": "0",
+                            "supportmixedcaseidentifier": "false", "agentGroupId": AG["US.US02.01"][1], "orgId": "018Z0P",
+                            "retryinterval": "0", "password": "", "autocommit": "false", "subtype": "Azure SQL Database",
+                            "jdbcdriverclassname": "com.microsoft.sqlserver.jdbc.SQLServerDriver",
+                            "username": "7730fa35-0f7f-4e05-b58c-aee7d165f4a3"},
+             "internal": False, "federatedId": JDBC_GUID, "retryNetworkError": False, "supportsCCIMultiGroup": False,
+             "metadataBrowsable": True, "supportLabels": True, "vaultEnabled": False, "vaultEnabledParams": [],
+             "connectorGuid": "com.informatica.adapter.jdbc_v2", "isRtAttrsRefreshRequired": False, "connectorStatus": "ACTIVE"}]
+    files[f"SYS/{JDBC_NAME}.Connection.zip"] = conn_zip(jdbc)
+    entry(JDBC_GUID, JDBC_NAME, "Connection", "/SYS", [AG["US.US02.01"][0]], state="COMPLETE", desc=None, repo="018Z0P0B0000000000D5")
+    ol = [{"@type": "connection", "id": "@1", "name": ONELAKE_NAME, "description": "Microsoft Fabric OneLake (P2O)",
+           "runtimeEnvironmentId": "@" + AG[CENTRAL_AG][0], "instanceName": "MicrosoftFabricOneLake",
+           "instanceDisplayName": "Microsoft Fabric OneLake", "type": "TOOLKIT_CCI", "baseType": "TOOLKIT", "subType": "TOOLKIT_CCI",
+           "port": -1, "timeout": 60,
+           "connParams": {"Workspace Name": "ws_p2o_intg_dev", "Client ID": "7730fa35-0f7f-4e05-b58c-aee7d165f4a3",
+                          "Tenant ID": "fe9c207f-da30-4226-82b5-bff6ef031c8c", "Client Secret": "",
+                          "agentId": "018Z0P08000000000004", "agentGroupId": AG[CENTRAL_AG][1], "orgId": "018Z0P"},
+           "internal": False, "federatedId": onelake[0], "retryNetworkError": False, "supportsCCIMultiGroup": False,
+           "metadataBrowsable": True, "supportLabels": True, "vaultEnabled": False, "vaultEnabledParams": [],
+           "isRtAttrsRefreshRequired": False, "connectorStatus": "ACTIVE"}]
+    files[f"SYS/{ONELAKE_NAME}.Connection.zip"] = conn_zip(ol)
+    entry(onelake[0], ONELAKE_NAME, "Connection", "/SYS", [AG[CENTRAL_AG][0]], state="COMPLETE", desc="Microsoft Fabric OneLake (P2O)",
+          repo=onelake[1])
+    for agn, created in (("US.US02.01", "2021-09-22T09:59:40.000Z"), ("US.AMCOR.01", "2026-06-25T15:38:08.000Z")):
+        rj = [{"@type": "runtimeEnvironment", "id": "@1", "name": agn, "isSystemAgentGroup": False, "isShared": False,
+               "federatedId": AG[agn][0], "createTimeUTC": created, "updateTimeUTC": created}]
+        files[f"SYS/{agn}.AgentGroup.zip"] = zbytes([("metadata.meta", dumps([{"@type": "objectRef", "id": "@1", "type": "runtimeEnvironment"}])),
+                                                     ("runtimeEnvironment.json", dumps(rj))])
+        entry(AG[agn][0], agn, "AgentGroup", "/SYS", [], desc=None, repo=AG[agn][1])
 
     with open(os.path.join(HERE, "ref", f"{PROJECT}.Project.json"), "rb") as f:
         files[f"Explore/{PROJECT}.Project.json"] = f.read()
@@ -737,9 +775,10 @@ def main():
     mi_defs = {"mi_collect": ("US.US02.01", "local", "onelake", r"D:\Interfaces\JDE\MATMAS\outbound", "JDE_MATMAS*.txt", landing_jde, "DELETE"),
                "mi_move": (CENTRAL_AG, "onelake", "onelake", landing_jde, "*", ONELAKE_ROOT + "/archive/JDE", "DELETE")}
     for k, (agn, s, tg_, sp_, pat, tp_, dele) in mi_defs.items():
-        files[f"Explore/{PROJECT}/{MI[k]}.MI_TASK.dat"] = mi_task(MI[k], G[k], agn, s, tg_, sp_, pat, tp_, dele, onelake)
+        handle = str(MI_HANDLE[k])
+        files[f"Explore/{PROJECT}/{MI[k]}.MI_TASK.dat"] = mi_task(MI[k], G[k], agn, s, tg_, sp_, pat, tp_, dele, onelake, handle)
         refs = [AG[agn][0]] + ([onelake[0]] if "onelake" in (s, tg_) else [])
-        entry(G[k], MI[k], "MI_TASK", PATH, refs, ctype="Binary", major=1, ctx=False)
+        entry(G[k], MI[k], "MI_TASK", PATH, refs, ctype="Binary", major=1, ctx=False, repo=handle)
 
     ids = {"reader": (f"mt_{N['reader']}", G["reader_t"]), "load": (f"mt_{N['load']}", G["load_t"]),
            "outcome": (f"mt_{N['outcome']}", G["outcome_t"]), "log": (f"mt_{N['log']}", G["log_t"]),

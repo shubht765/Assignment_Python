@@ -23,7 +23,7 @@ Every source and target comes from the config table and settings. The file inges
 | `fi_P2O_100_MATMAS_Agent_to_OneLake`, `fi_P2O_101_MATMAS_OneLake_Move` | File ingestion tasks |
 | `m_/mt_P2O_101_MATMAS_Route_Reader`, `_102_MATMAS_Load`, `_103_MATMAS_Outcome`, `_104_MATMAS_Log` | 4 mappings and 4 mapping tasks |
 
-The connections `jdbcv2.MSSQL.sqldb-p2o-intg.stg` and `FABRIC.AMCOR.ONELAKE.P2O`, and the agent groups, are only **referenced**. The import never overwrites them.
+The package also contains the connections `jdbcv2.MSSQL.sqldb-p2o-intg.stg` and `FABRIC.AMCOR.ONELAKE.P2O` and the agent groups `US.US02.01` and `US.AMCOR.01`, the same way your own exports ship dependencies. The import option *"Overwrite existing assets, excluding connections and runtime environments"* never overwrites them. They are there only so that every reference resolves. On the import screen, map each one to the existing connection or agent group if you are asked.
 
 ## How it was built
 
@@ -43,8 +43,9 @@ Checks run on the package:
 1. **Database.** Run `sql/01_tables.sql`, `sql/02_procedures.sql` and `sql/03_seed_config.sql`. Fill in the real agent groups, source folders and patterns in `MATMAS.CTL_MATMAS_ROUTE`.
 2. **Lakehouse `lh_p2o_intg_dev`.** Upload `samples/JDE/JDE_MATMAS_20261116.txt` to `Files/erp_to_matmas/landing/JDE/_design/`. It is the design file of the load mapping.
 3. **Import.** In IDMC, go to Explore, then Import, and select `MATMAS_CDI_Import.zip`. Import all objects into `zPF_TCS_Shubham`.
-4. **Post-import checklist.** It takes about 10 minutes and is described below.
-5. **Run.** Publish `tf_P2O_100_MATMAS_Orchestrator`, run it once with `RUN_GROUP = DAILY`, then schedule it.
+4. **If the import still reports errors**, scroll the Select Assets table to the right to the **Status** column and hover over each red status for its message. Send me those messages.
+5. **Post-import checklist.** It takes about 10 minutes and is described below.
+6. **Run.** Publish `tf_P2O_100_MATMAS_Orchestrator`, run it once with `RUN_GROUP = DAILY`, then schedule it.
 
 ## Post-import checklist
 
