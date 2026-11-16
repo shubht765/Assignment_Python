@@ -1,3 +1,0 @@
-ERP Item Number|Material Description|Plant Code|Supplier Part#|Supplier Number|Manufacturing Part#|Start Date|End Date
-109589|SEN,PROXIMITY,29MM,12-24VDC|AUR|4462658 (Primary)|456526|4462658 (Fallback)|2026-01-01|9999-12-31
-109589|SEN,PROXIMITY,29MM,12-24VDC|AUR|4462658 (Primary)|456526|4462658 (Fallback)|2026-01-01|9999-12-31

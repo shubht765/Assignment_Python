@@ -1,147 +1,48 @@
 /* =====================================================================
-   MATMAS - 03: seed configuration
-   Systems, canonical column list, JDE + VISION inbound routes (routed by
-   sub-folder MATMAS\inbound\JDE and MATMAS\inbound\VISION) with their
-   field mappings, one outbound route to MATMAS.MATERIAL_MASTER_TARGET.
-   Re-runnable: deletes and re-inserts its own rows.
+   MATMAS - 03: route configuration (one row per source location)
+   Replace the <...> placeholders and the example agent / connection names
+   with the real ones from your IDMC org before the first run.
+   Re-runnable (MERGE on ROUTE_ID).
    ===================================================================== */
 SET NOCOUNT ON;
 
-/* 1. systems ---------------------------------------------------------- */
-MERGE MATMAS.CTL_SOURCE_SYSTEM AS t
+MERGE MATMAS.CTL_MATMAS_ROUTE AS t
 USING (VALUES
-  ('JDE',    N'JD Edwards EnterpriseOne',             'ERP', 23),
-  ('VISION', N'Vision (SAP)',                         'ERP', 103),
-  ('SAP',    N'SAP S/4HANA',                          'ERP', 23),
-  ('COUPA',  N'Coupa (SimplyBuy)',                    'P2P', 23),
-  ('MATMAS', N'Material master hub (this database)',  'MDM', 23)
-) AS s (SYSTEM_CODE, SYSTEM_NAME, SYSTEM_TYPE, DEFAULT_DATE_STYLE)
-ON t.SYSTEM_CODE = s.SYSTEM_CODE
-WHEN NOT MATCHED THEN INSERT (SYSTEM_CODE, SYSTEM_NAME, SYSTEM_TYPE, DEFAULT_DATE_STYLE, CREATED_BY)
-                      VALUES (s.SYSTEM_CODE, s.SYSTEM_NAME, s.SYSTEM_TYPE, s.DEFAULT_DATE_STYLE, 'MATMAS_SETUP');
+ -- ROUTE_ID,          ERP,      name,                               group,  order, runtime env,        source connection,   source directory,                         pattern,          agent archive dir,                              OneLake conn,  OneLake base dir,                  target table,             operation, keys
+ ('JDE_MATMAS',       'JDE',    N'JDE material master',             'DAILY', 10, N'US.US02.01',        N'LF_MATMAS_JDE',    N'D:\Interfaces\JDE\MATMAS\outbound',     N'JDE_MATMAS*.txt',    N'D:\Interfaces\JDE\MATMAS\archive',      N'OL_MATMAS', N'Files/matmas/inbound/JDE',     N'JDE_MATERIAL_MASTER',    'UPSERT', N'ERP_ITEM_NUMBER,PLANT_CODE,SUPPLIER_NUMBER,SUPPLIER_PART_NUMBER'),
+ ('VISION_MATMAS',    'VISION', N'Vision material master',          'DAILY', 20, N'US.AMCOR.01',       N'LF_MATMAS_VISION', N'D:\Interfaces\VISION\MATMAS\outbound',  N'VISION_MATMAS*.txt', N'D:\Interfaces\VISION\MATMAS\archive',   N'OL_MATMAS', N'Files/matmas/inbound/VISION',  N'VISION_MATERIAL_MASTER', 'UPSERT', N'ERP_ITEM_NUMBER,PLANT_CODE,SUPPLIER_NUMBER,SUPPLIER_PART_NUMBER'),
+ ('SAP_MATMAS',       'SAP',    N'SAP material master',             'DAILY', 30, N'<SAP_AGENT_GROUP>', N'LF_MATMAS_SAP',    N'<SAP agent folder>',                    N'SAP_MATMAS*.txt',    NULL,                                     N'OL_MATMAS', N'Files/matmas/inbound/SAP',     N'SAP_MATERIAL_MASTER',    'UPSERT', N'ERP_ITEM_NUMBER,PLANT_CODE,SUPPLIER_NUMBER,SUPPLIER_PART_NUMBER')
+) AS s (ROUTE_ID, ERP_SYSTEM, ROUTE_NAME, RUN_GROUP, RUN_ORDER, RUNTIME_ENVIRONMENT, SOURCE_CONNECTION, SOURCE_DIRECTORY,
+        FILE_PATTERN, SOURCE_ARCHIVE_DIRECTORY, ONELAKE_CONNECTION, ONELAKE_DIRECTORY, TARGET_TABLE, LOAD_OPERATION, KEY_COLUMNS)
+ON t.ROUTE_ID = s.ROUTE_ID
+WHEN MATCHED THEN UPDATE SET
+     ERP_SYSTEM = s.ERP_SYSTEM, ROUTE_NAME = s.ROUTE_NAME, RUN_GROUP = s.RUN_GROUP, RUN_ORDER = s.RUN_ORDER,
+     RUNTIME_ENVIRONMENT = s.RUNTIME_ENVIRONMENT, SOURCE_CONNECTION = s.SOURCE_CONNECTION, SOURCE_DIRECTORY = s.SOURCE_DIRECTORY,
+     FILE_PATTERN = s.FILE_PATTERN, SOURCE_ARCHIVE_DIRECTORY = s.SOURCE_ARCHIVE_DIRECTORY, ONELAKE_CONNECTION = s.ONELAKE_CONNECTION,
+     ONELAKE_DIRECTORY = s.ONELAKE_DIRECTORY, TARGET_TABLE = s.TARGET_TABLE, LOAD_OPERATION = s.LOAD_OPERATION,
+     KEY_COLUMNS = s.KEY_COLUMNS, UPDATED_TS = SYSUTCDATETIME(), UPDATED_BY = 'MATMAS_SETUP'
+WHEN NOT MATCHED THEN INSERT (ROUTE_ID, ERP_SYSTEM, ROUTE_NAME, RUN_GROUP, RUN_ORDER, RUNTIME_ENVIRONMENT, SOURCE_CONNECTION,
+     SOURCE_DIRECTORY, FILE_PATTERN, SOURCE_ARCHIVE_DIRECTORY, ONELAKE_CONNECTION, ONELAKE_DIRECTORY, TARGET_TABLE,
+     LOAD_OPERATION, KEY_COLUMNS, CREATED_BY)
+VALUES (s.ROUTE_ID, s.ERP_SYSTEM, s.ROUTE_NAME, s.RUN_GROUP, s.RUN_ORDER, s.RUNTIME_ENVIRONMENT, s.SOURCE_CONNECTION,
+     s.SOURCE_DIRECTORY, s.FILE_PATTERN, s.SOURCE_ARCHIVE_DIRECTORY, s.ONELAKE_CONNECTION, s.ONELAKE_DIRECTORY, s.TARGET_TABLE,
+     s.LOAD_OPERATION, s.KEY_COLUMNS, 'MATMAS_SETUP');
 
-/* 2. canonical column list (drives the generated SELECT) -------------- */
-DELETE FROM MATMAS.CTL_CANONICAL_COLUMN;
-INSERT INTO MATMAS.CTL_CANONICAL_COLUMN (COLUMN_NAME, SQL_TYPE, ORDINAL, DESCRIPTION) VALUES
- ('SOURCE_SYSTEM',            'VARCHAR(20)',    5, N'Set by the route, not mapped'),
- ('ERP_ITEM_NUMBER',          'VARCHAR(50)',   10, N'Item / material number in the source ERP'),
- ('MATERIAL_DESCRIPTION',     'NVARCHAR(240)', 20, NULL),
- ('PLANT_CODE',               'VARCHAR(10)',   30, N'Plant / branch / site'),
- ('SUPPLIER_NUMBER',          'VARCHAR(30)',   40, NULL),
- ('SUPPLIER_PART_NUMBER',     'VARCHAR(60)',   50, N'Without the (Primary)/(Fallback) qualifier'),
- ('SUPPLIER_PART_ROLE',       'VARCHAR(10)',   60, N'PRIMARY / FALLBACK'),
- ('MANUFACTURER_PART_NUMBER', 'VARCHAR(60)',   70, NULL),
- ('MANUFACTURER_PART_ROLE',   'VARCHAR(10)',   80, N'PRIMARY / FALLBACK'),
- ('START_DATE',               'DATE',          90, N'Business effectivity start'),
- ('END_DATE',                 'DATE',         100, N'Business effectivity end'),
- ('ITEM_STATUS',              'VARCHAR(20)',  110, N'ACTIVE / INACTIVE'),
- ('BASE_UOM',                 'VARCHAR(10)',  120, NULL),
- ('ITEM_CATEGORY',            'VARCHAR(50)',  130, NULL),
- ('COMMODITY_CODE',           'VARCHAR(30)',  140, NULL),
- ('EXT_ATTR_01',              'NVARCHAR(100)',150, N'Source specific overflow'),
- ('EXT_ATTR_02',              'NVARCHAR(100)',160, NULL),
- ('EXT_ATTR_03',              'NVARCHAR(100)',170, NULL),
- ('EXT_ATTR_04',              'NVARCHAR(100)',180, NULL),
- ('EXT_ATTR_05',              'NVARCHAR(100)',190, NULL);
+-- SAP stays inactive until its agent group and folder are filled in
+UPDATE MATMAS.CTL_MATMAS_ROUTE SET ACTIVE_FLAG = 'N' WHERE ROUTE_ID = 'SAP_MATMAS' AND RUNTIME_ENVIRONMENT LIKE N'<%';
 
-/* 3. clean own rows ---------------------------------------------------- */
-DELETE FROM MATMAS.CTL_FIELD_MAPPING WHERE INTEGRATION_ID IN ('IN_JDE_MATMAS_FILE','IN_VISION_MATMAS_FILE','OUT_ALL_TO_TARGET');
-DELETE FROM MATMAS.CTL_PARAMETER;
-DELETE FROM MATMAS.CTL_INBOUND_INTEGRATION  WHERE INTEGRATION_ID IN ('IN_JDE_MATMAS_FILE','IN_VISION_MATMAS_FILE');
-DELETE FROM MATMAS.CTL_OUTBOUND_INTEGRATION WHERE INTEGRATION_ID IN ('OUT_ALL_TO_TARGET');
-
-/* 4. inbound routes: folder MATMAS\inbound\<FOLDER_KEY>, file LIKE FILE_NAME_PATTERN */
-INSERT INTO MATMAS.CTL_INBOUND_INTEGRATION
-  (INTEGRATION_ID, INTEGRATION_NAME, SOURCE_SYSTEM, SOURCE_TYPE, FOLDER_KEY, FILE_NAME_PATTERN,
-   SOURCE_CONNECTION, SOURCE_FOLDER, ARCHIVE_FOLDER, FILE_DELIMITER, EXPECTED_HEADER,
-   LOAD_TYPE, NATURAL_KEY_COLUMNS, RUN_SEQUENCE, CREATED_BY)
-VALUES
-  ('IN_JDE_MATMAS_FILE', N'JDE material master file -> canonical', 'JDE', 'FILE',
-   N'JDE', N'JDE_MATMAS%.txt',
-   'FF_MATMAS_INBOUND', N'MATMAS\inbound\JDE', N'MATMAS\archive\JDE', '|',
-   N'ERP Item Number|Material Description|Plant Code|Supplier Part#|Supplier Number|Manufacturing Part#|Start Date|End Date',
-   'FULL', 'SOURCE_SYSTEM,ERP_ITEM_NUMBER,PLANT_CODE,SUPPLIER_NUMBER,SUPPLIER_PART_NUMBER', 10, 'MATMAS_SETUP'),
-  ('IN_VISION_MATMAS_FILE', N'Vision material master file -> canonical (layout ASSUMED)', 'VISION', 'FILE',
-   N'VISION', N'VISION_MATMAS%.txt',
-   'FF_MATMAS_INBOUND', N'MATMAS\inbound\VISION', N'MATMAS\archive\VISION', '|',
-   N'ITEM_CODE|ITEM_DESC|SITE|VENDOR_ID|VENDOR_PART|PART_PRIORITY|MFR_PART|EFF_FROM|EFF_TO|UOM',
-   'FULL', 'SOURCE_SYSTEM,ERP_ITEM_NUMBER,PLANT_CODE,SUPPLIER_NUMBER,SUPPLIER_PART_NUMBER', 20, 'MATMAS_SETUP');
-
-/* 5. JDE field mappings: LANDING_RAW.COLnn -> canonical ---------------- */
-INSERT INTO MATMAS.CTL_FIELD_MAPPING (INTEGRATION_ID, DIRECTION, ORDINAL, SOURCE_COLUMN, TARGET_COLUMN, TRANSFORM_EXPR, VALIDATION_EXPR, DATA_TYPE, MANDATORY_FLAG, KEY_FLAG, DESCRIPTION) VALUES
- ('IN_JDE_MATMAS_FILE','IN', 10,'COL01','ERP_ITEM_NUMBER',
-  N'NULLIF(LTRIM(RTRIM(COL01)),'''')', NULL, 'STRING','Y','Y', N'ERP Item Number'),
- ('IN_JDE_MATMAS_FILE','IN', 20,'COL02','MATERIAL_DESCRIPTION',
-  N'NULLIF(LTRIM(RTRIM(COL02)),'''')', NULL, 'STRING','Y','N', N'Material Description'),
- ('IN_JDE_MATMAS_FILE','IN', 30,'COL03','PLANT_CODE',
-  N'UPPER(NULLIF(LTRIM(RTRIM(COL03)),''''))', NULL, 'STRING','Y','Y', N'Plant Code'),
- ('IN_JDE_MATMAS_FILE','IN', 40,'COL04','SUPPLIER_PART_NUMBER',
-  N'NULLIF(LTRIM(RTRIM(CASE WHEN CHARINDEX(''('',COL04)>0 THEN LEFT(COL04, CHARINDEX(''('',COL04)-1) ELSE COL04 END)),'''')', NULL,
-  'STRING','Y','Y', N'Supplier Part# without the (Primary)/(Fallback) qualifier'),
- ('IN_JDE_MATMAS_FILE','IN', 50,'COL04','SUPPLIER_PART_ROLE',
-  N'CASE WHEN UPPER(COL04) LIKE ''%FALLBACK%'' THEN ''FALLBACK'' ELSE ''PRIMARY'' END', NULL, 'STRING','N','N', N'Qualifier parsed from Supplier Part#'),
- ('IN_JDE_MATMAS_FILE','IN', 60,'COL05','SUPPLIER_NUMBER',
-  N'NULLIF(LTRIM(RTRIM(COL05)),'''')', NULL, 'STRING','Y','Y', N'Supplier Number'),
- ('IN_JDE_MATMAS_FILE','IN', 70,'COL06','MANUFACTURER_PART_NUMBER',
-  N'NULLIF(LTRIM(RTRIM(CASE WHEN CHARINDEX(''('',COL06)>0 THEN LEFT(COL06, CHARINDEX(''('',COL06)-1) ELSE COL06 END)),'''')', NULL,
-  'STRING','N','N', N'Manufacturing Part# without qualifier'),
- ('IN_JDE_MATMAS_FILE','IN', 80,'COL06','MANUFACTURER_PART_ROLE',
-  N'CASE WHEN NULLIF(LTRIM(RTRIM(COL06)),'''') IS NULL THEN NULL WHEN UPPER(COL06) LIKE ''%FALLBACK%'' THEN ''FALLBACK'' ELSE ''PRIMARY'' END', NULL,
-  'STRING','N','N', N'Qualifier parsed from Manufacturing Part#'),
- ('IN_JDE_MATMAS_FILE','IN', 90,'COL07','START_DATE',
-  N'COALESCE(TRY_CONVERT(DATE, NULLIF(LTRIM(RTRIM(COL07)),''''), 23), CAST(GETDATE() AS DATE))',
-  N'NULLIF(LTRIM(RTRIM(COL07)),'''') IS NOT NULL AND TRY_CONVERT(DATE, LTRIM(RTRIM(COL07)), 23) IS NULL',
-  'DATE','N','N', N'Start Date yyyy-mm-dd; defaults to load date when empty'),
- ('IN_JDE_MATMAS_FILE','IN',100,'COL08','END_DATE',
-  N'COALESCE(TRY_CONVERT(DATE, NULLIF(LTRIM(RTRIM(COL08)),''''), 23), CAST(''9999-12-31'' AS DATE))',
-  N'NULLIF(LTRIM(RTRIM(COL08)),'''') IS NOT NULL AND TRY_CONVERT(DATE, LTRIM(RTRIM(COL08)), 23) IS NULL',
-  'DATE','N','N', N'End Date yyyy-mm-dd; defaults to 9999-12-31 when empty');
-
-/* 6. VISION field mappings (layout assumed: dates dd/mm/yyyy, priority P/F) */
-INSERT INTO MATMAS.CTL_FIELD_MAPPING (INTEGRATION_ID, DIRECTION, ORDINAL, SOURCE_COLUMN, TARGET_COLUMN, TRANSFORM_EXPR, VALIDATION_EXPR, DATA_TYPE, MANDATORY_FLAG, KEY_FLAG, DESCRIPTION) VALUES
- ('IN_VISION_MATMAS_FILE','IN', 10,'COL01','ERP_ITEM_NUMBER',      N'NULLIF(LTRIM(RTRIM(COL01)),'''')', NULL,'STRING','Y','Y', N'ITEM_CODE'),
- ('IN_VISION_MATMAS_FILE','IN', 20,'COL02','MATERIAL_DESCRIPTION', N'NULLIF(LTRIM(RTRIM(COL02)),'''')', NULL,'STRING','Y','N', N'ITEM_DESC'),
- ('IN_VISION_MATMAS_FILE','IN', 30,'COL03','PLANT_CODE',           N'UPPER(NULLIF(LTRIM(RTRIM(COL03)),''''))', NULL,'STRING','Y','Y', N'SITE'),
- ('IN_VISION_MATMAS_FILE','IN', 40,'COL04','SUPPLIER_NUMBER',      N'NULLIF(LTRIM(RTRIM(COL04)),'''')', NULL,'STRING','Y','Y', N'VENDOR_ID'),
- ('IN_VISION_MATMAS_FILE','IN', 50,'COL05','SUPPLIER_PART_NUMBER', N'NULLIF(LTRIM(RTRIM(COL05)),'''')', NULL,'STRING','Y','Y', N'VENDOR_PART'),
- ('IN_VISION_MATMAS_FILE','IN', 60,'COL06','SUPPLIER_PART_ROLE',
-  N'CASE WHEN UPPER(LTRIM(RTRIM(COL06))) IN (''F'',''FALLBACK'') THEN ''FALLBACK'' ELSE ''PRIMARY'' END', NULL,'STRING','N','N', N'PART_PRIORITY P/F'),
- ('IN_VISION_MATMAS_FILE','IN', 70,'COL07','MANUFACTURER_PART_NUMBER', N'NULLIF(LTRIM(RTRIM(COL07)),'''')', NULL,'STRING','N','N', N'MFR_PART'),
- ('IN_VISION_MATMAS_FILE','IN', 80,NULL,  'MANUFACTURER_PART_ROLE',
-  N'CASE WHEN NULLIF(LTRIM(RTRIM(COL07)),'''') IS NULL THEN NULL ELSE ''PRIMARY'' END', NULL,'STRING','N','N', N'Vision has no qualifier'),
- ('IN_VISION_MATMAS_FILE','IN', 90,'COL08','START_DATE',
-  N'COALESCE(TRY_CONVERT(DATE, NULLIF(LTRIM(RTRIM(COL08)),''''), 103), CAST(GETDATE() AS DATE))',
-  N'NULLIF(LTRIM(RTRIM(COL08)),'''') IS NOT NULL AND TRY_CONVERT(DATE, LTRIM(RTRIM(COL08)), 103) IS NULL','DATE','N','N', N'EFF_FROM dd/mm/yyyy'),
- ('IN_VISION_MATMAS_FILE','IN',100,'COL09','END_DATE',
-  N'COALESCE(TRY_CONVERT(DATE, NULLIF(LTRIM(RTRIM(COL09)),''''), 103), CAST(''9999-12-31'' AS DATE))',
-  N'NULLIF(LTRIM(RTRIM(COL09)),'''') IS NOT NULL AND TRY_CONVERT(DATE, LTRIM(RTRIM(COL09)), 103) IS NULL','DATE','N','N', N'EFF_TO dd/mm/yyyy'),
- ('IN_VISION_MATMAS_FILE','IN',110,'COL10','BASE_UOM',             N'UPPER(NULLIF(LTRIM(RTRIM(COL10)),''''))', NULL,'STRING','N','N', N'UOM');
-
-/* 7. outbound route: all current materials -> MATERIAL_MASTER_TARGET (JDE-details format) */
-INSERT INTO MATMAS.CTL_OUTBOUND_INTEGRATION
-  (INTEGRATION_ID, INTEGRATION_NAME, TARGET_SYSTEM, TARGET_TYPE, TARGET_CONNECTION, TARGET_OBJECT,
-   SOURCE_FILTER, PUBLISH_MODE, RUN_SEQUENCE, CREATED_BY)
-VALUES
-  ('OUT_ALL_TO_TARGET', N'All current materials -> MATMAS.MATERIAL_MASTER_TARGET', 'MATMAS', 'TABLE',
-   'jdbcv2.MSSQL.sqldb-p2o-intg.stg', 'MATMAS.MATERIAL_MASTER_TARGET',
-   N'1 = 1', 'FULL', 10, 'MATMAS_SETUP');
-
-INSERT INTO MATMAS.CTL_FIELD_MAPPING (INTEGRATION_ID, DIRECTION, ORDINAL, SOURCE_COLUMN, TARGET_COLUMN, TRANSFORM_EXPR, DESCRIPTION) VALUES
- ('OUT_ALL_TO_TARGET','OUT', 5,'SOURCE_SYSTEM',           'Source System',        NULL, N'drop this row + column for a strict 8-column target'),
- ('OUT_ALL_TO_TARGET','OUT',10,'ERP_ITEM_NUMBER',         'ERP Item Number',      NULL, NULL),
- ('OUT_ALL_TO_TARGET','OUT',20,'MATERIAL_DESCRIPTION',    'Material Description', NULL, NULL),
- ('OUT_ALL_TO_TARGET','OUT',30,'PLANT_CODE',              'Plant Code',           NULL, NULL),
- ('OUT_ALL_TO_TARGET','OUT',40,'SUPPLIER_PART_NUMBER',    'Supplier Part#',
-  N'CONCAT(mm.SUPPLIER_PART_NUMBER, '' ('', CASE mm.SUPPLIER_PART_ROLE WHEN ''FALLBACK'' THEN ''Fallback'' ELSE ''Primary'' END, '')'')', N're-compose "4462658 (Primary)"'),
- ('OUT_ALL_TO_TARGET','OUT',50,'SUPPLIER_NUMBER',         'Supplier Number',      NULL, NULL),
- ('OUT_ALL_TO_TARGET','OUT',60,'MANUFACTURER_PART_NUMBER','Manufacturing Part#',
-  N'CASE WHEN mm.MANUFACTURER_PART_NUMBER IS NULL THEN NULL ELSE CONCAT(mm.MANUFACTURER_PART_NUMBER, '' ('', CASE mm.MANUFACTURER_PART_ROLE WHEN ''FALLBACK'' THEN ''Fallback'' ELSE ''Primary'' END, '')'') END', N're-compose "4462658 (Fallback)"'),
- ('OUT_ALL_TO_TARGET','OUT',70,'START_DATE',              'Start Date',           NULL, NULL),
- ('OUT_ALL_TO_TARGET','OUT',80,'END_DATE',                'End Date',             NULL, NULL);
-
-/* 8. parameters -------------------------------------------------------- */
-INSERT INTO MATMAS.CTL_PARAMETER (INTEGRATION_ID, PARAM_NAME, PARAM_VALUE, DESCRIPTION) VALUES
- ('*', 'FILE_DELIMITER',         '|',                          N'Inbound file contract: pipe delimited, header row, UTF-8'),
- ('*', 'NOTIFY_EMAIL',           'matmas-support@example.com', N'Failure notification list (replace)'),
- ('*', 'LANDING_RETENTION_DAYS', '30',                         N'Purge LANDING_RAW older than N days');
+SELECT * FROM MATMAS.V_MATMAS_ROUTE_READER ORDER BY RUN_GROUP, ROW_NUM;
 GO
+
+/* ---------------------------------------------------------------------
+   ONBOARDING A NEW ERP = these two statements, nothing in CDI:
+
+   EXEC MATMAS.sp_MATMAS_CreateErpTable N'QAD_MATERIAL_MASTER';
+
+   INSERT INTO MATMAS.CTL_MATMAS_ROUTE (ROUTE_ID, ERP_SYSTEM, ROUTE_NAME, RUNTIME_ENVIRONMENT, SOURCE_CONNECTION,
+          SOURCE_DIRECTORY, FILE_PATTERN, SOURCE_ARCHIVE_DIRECTORY, ONELAKE_CONNECTION, ONELAKE_DIRECTORY,
+          TARGET_TABLE, LOAD_OPERATION, RUN_ORDER)
+   VALUES ('QAD_MATMAS', 'QAD', N'QAD material master', N'<agent group>', N'<local folder connection>',
+          N'<folder on that agent>', N'QAD_MATMAS*.txt', N'<archive folder>', N'OL_MATMAS', N'Files/matmas/inbound/QAD',
+          N'QAD_MATERIAL_MASTER', 'UPSERT', 40);
+   --------------------------------------------------------------------- */

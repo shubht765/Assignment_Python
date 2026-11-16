@@ -1,0 +1,3 @@
+ERP Item Number|Material Description|Plant Code|Supplier Part#|Supplier Number|Manufacturing Part#
+V-20001|SENSOR PROXIMITY 18MM 24VDC|MEL|PX-18-24 (Primary)|78001|PX-18-24 (Primary)
+V-20001|SENSOR PROXIMITY 18MM 24VDC|MEL|PX18-ALT (Fallback)|78002|PX18-ALT (Fallback)

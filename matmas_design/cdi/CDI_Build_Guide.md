@@ -1,159 +1,232 @@
-# MATMAS – Informatica CDI guide (import + build)
+# MATMAS – CDI build guide
 
-The whole CDI side is **2 mappings, 2 mapping tasks, 1 taskflow**. None of them is ERP specific. A new ERP is a new folder plus rows in the control tables.
+One scheduled taskflow runs in the IDMC cloud and reads `MATMAS.CTL_MATMAS_ROUTE` row by row. For each row it:
 
-| Object | How you get it | What it does |
+1. **Collects** the files from that row's Secure Agent folder into OneLake. This uses one file ingestion task, with runtime environment, connections, folder and pattern overridden from the row.
+2. **Loads** them with one generic mapping task. The mapping adds Start Date and End Date to the 6 fields and stages the rows. Its Post SQL applies them to the row's ERP table with the row's operation.
+3. **Archives** the source files on that same agent. A Command Task does this, with its runtime environment taken from the row.
+4. **Logs** every outcome to `MATMAS.CTL_MATMAS_RUN_LOG`.
+
+Objects to build. None of them is specific to an ERP or a location.
+
+| Object | Type | Purpose |
 |---|---|---|
-| `m_MATMAS_PROCESS` | **Import** `cdi/import/MATMAS_CDI_Import.zip` | Inserts one run request through `stg.MATMAS_RUN_REQUEST`. Its target Post SQL runs `EXEC MATMAS.sp_MATMAS_Process`: route files, harmonize, history, publish |
-| `m_MATMAS_LAND` | Build (2 transformations, about 10 minutes) | Reads **every file in every ERP folder** in one run (indirect file list) into `stg.MATMAS_LANDING_RAW` |
-| `mt_MATMAS_LAND` | Create on the mapping | Pre-processing command builds the file list |
-| `mt_MATMAS_PROCESS` | Create on the mapping | Post-processing command archives the processed files |
-| `tf_MATMAS_DAILY` | Create (2 Data Tasks) | Runs land, then process. Schedule it |
+| `OL_MATMAS` | Connection (OneLake) | The central landing zone |
+| `LF_MATMAS_<agent>` | Connection (local folder) | Source for the file ingestion task, one per agent group |
+| `m_MATMAS_ROUTE_READER` / `mt_MATMAS_ROUTE_READER` | Mapping + task | Reads config row N and returns its values to the taskflow |
+| `fit_MATMAS_COLLECT` | File ingestion and replication task | Copies agent folder to OneLake |
+| `m_MATMAS_LOAD` / `mt_MATMAS_LOAD` | Mapping + task | 6 fields plus 2 dates into staging. Post SQL applies to the ERP table |
+| `m_MATMAS_LOG` / `mt_MATMAS_LOG` | Mapping + task | Writes NO_FILE and failure events |
+| `tf_MATMAS_ORCHESTRATOR` | Taskflow | The loop, scheduled |
 
-How the import package was made: it follows the exact structure of your export `Mapping58-1794813874687.zip`. That covers the manifest, the SHA-256 checksum file, the DTEMPLATE zip and the class table. It reuses your JDBC V2 connection `jdbcv2.MSSQL.sqldb-p2o-intg.stg` (GUID `1AIvTtPhmimhpwYPfj4G2j`) on runtime environment `US.US02.01`. It is regenerated with `cdi/tools/build_cdi_package.py`.
-
-The land mapping is not in the package. A flat-file source stores its format in a separate file-format object that your reference export does not contain, and a guessed one would not import. Export any small flat-file mapping from your org and send it to me, and the land mapping will be added to the package the same way.
+Documentation this design relies on:
+- [Ingestion Task step](https://docs.informatica.com/integration-cloud/data-integration/current-version/taskflows/taskflows/setting-taskflow-step-properties/ingestion-task-step.html): overrides Runtime Environment, Source/Target Connection, Source/Target Directory, File Pattern.
+- [Command Task step](https://docs.informatica.com/integration-cloud/data-integration/current-version/taskflows/taskflows/setting-taskflow-step-properties/command-task-step.html): Runtime Environment can come from a field.
+- [Data Task step](https://docs.informatica.com/integration-cloud/data-integration/current-version/taskflows/taskflows/setting-taskflow-step-properties/data-task-step.html): overrides in-out and input parameters.
+- [KB 000225868](https://knowledge.informatica.com/s/article/HOW-TO-Loop-data-task-in-taskflow-to-process-different-source-targets?language=en_US): read a control table row by row in a loop.
 
 ---
 
 ## 0. Prerequisites
 
-1. Run on the Fabric SQL database, in order: `sql/01_schema_and_tables.sql`, `sql/02_procedures.sql`, `sql/03_seed_config.sql`.
-   If `STRING_SPLIT(..., 1)` errors, raise the compatibility level once: `ALTER DATABASE CURRENT SET COMPATIBILITY_LEVEL = 160;`
-2. Run `sql/04_test_without_cdi.sql`. It must end with run status `SUCCESS`, 3 rows in `MATMAS.MATERIAL_MASTER_TARGET` and 1 reject. This proves the SQL side before CDI is involved.
-3. The service principal used by the JDBC V2 connection needs on the database: `SELECT, INSERT` on schema `stg`, and `EXECUTE` on schema `MATMAS`. The procedures run with the owner's rights for the tables they touch (ownership chaining inside schema MATMAS), but if your schemas have different owners also grant `SELECT, INSERT, UPDATE, DELETE` on schema `MATMAS`. `sp_Publish` truncates the target table, which needs `ALTER` on that table.
-4. Copy `secure_agent/MATMAS` to the Secure Agent machine of runtime environment `US.US02.01`. Default path used everywhere: `C:\Informatica\SecureAgent\MATMAS`. The agent service account needs read/write there.
+1. On the Fabric SQL database, run `sql/01_tables.sql`, `sql/02_procedures.sql`, `sql/03_seed_config.sql`. Then fill in the real agent group, connection and folder names in `CTL_MATMAS_ROUTE`.
+2. Run `sql/04_test_without_cdi.sql`. The expected results are written in its comments.
+3. Check that **File Ingestion and Replication** is enabled in your org.
+4. **Every source agent must reach OneLake** over HTTPS (`onelake.dfs.fabric.microsoft.com`). The copy runs on the agent where the file lands, and that agent pushes it to OneLake.
+5. Copy `agent_scripts/matmas_archive_source.cmd` and `.ps1` to the **same path on every source agent**, for example `C:\Informatica\scripts\`. Use the `.sh` on Linux agents. This is one script per machine, not per location. It receives everything as arguments from the config row.
+6. Pick a **central runtime environment** for the reader, load and log tasks. It must reach OneLake and the Fabric SQL database. `US.US02.01` already runs `jdbcv2.MSSQL.sqldb-p2o-intg.stg`.
 
 ---
 
-## 1. Import `m_MATMAS_PROCESS`
+## 1. Connections
 
-1. Data Integration → **Explore** → **Import** → select `cdi/import/MATMAS_CDI_Import.zip`.
-2. Objects listed: `m_MATMAS_PROCESS` (mapping, project `zPF_TCS_Shubham`), connection `jdbcv2.MSSQL.sqldb-p2o-intg.stg`, runtime environment `US.US02.01`, project `zPF_TCS_Shubham`.
-3. **Do not overwrite the connection or the runtime environment.** Choose the existing ones, or deselect them. The connection in the package has no password on purpose, so overwriting it would blank the password in your org.
-4. Import. Open `m_MATMAS_PROCESS` and click **Validate**.
-5. Check the target: Target → **Advanced** → *Post SQL* = `EXEC MATMAS.sp_MATMAS_Process`.
+| Name | Type | Settings |
+|---|---|---|
+| `jdbcv2.MSSQL.sqldb-p2o-intg.stg` | JDBC V2, existing | Unchanged. All MATMAS objects CDI touches are views in schema `stg`. |
+| `OL_MATMAS` | Microsoft Fabric OneLake, or Azure Data Lake Storage Gen2 pointed at `onelake.dfs.fabric.microsoft.com` | Workspace and lakehouse that hold `Files/matmas/...`. Service principal with write access. |
+| `LF_MATMAS_JDE`, `LF_MATMAS_VISION`, … | Local folder (file ingestion source) | One per agent group. The directory is overridden per row, so any default works. |
 
-If the import reports an error, send me the exact message. The package is generated, so a fix is a re-run of the script.
-
-Manual equivalent, if you prefer to build it:
-
-- **Source**: connection `jdbcv2.MSSQL.sqldb-p2o-intg.stg`, single object `MATMAS_RUN_REQUEST_SRC` (a view in schema `stg`).
-- **Target**: same connection, existing object `MATMAS_RUN_REQUEST`, operation Insert, field mapping Automatic.
-- Target **Advanced → Post SQL**: `EXEC MATMAS.sp_MATMAS_Process`.
+Put a test file into OneLake once at `Files/matmas/inbound/_design/JDE_MATMAS_20261116.txt`, copied from `samples/JDE`. The load mapping imports its field list from it.
 
 ---
 
-## 2. Connection for the files: `FF_MATMAS`
+## 2. `m_MATMAS_ROUTE_READER`: read config row N
 
-Administrator → Connections → New:
+**In-out parameters.** All are String, aggregation Max, default value empty:
 
-| Property | Value |
+`RUN_GROUP` (default `DAILY`), `ROW_ID` (Integer, default `1`), `RUN_ID`,
+`ROUTE_ID`, `ERP_SYSTEM`, `RUNTIME_ENVIRONMENT`, `SOURCE_CONNECTION`, `SOURCE_DIRECTORY`, `FILE_PATTERN`,
+`SOURCE_ARCHIVE_DIRECTORY`, `ONELAKE_CONNECTION`, `ONELAKE_DIRECTORY`, `TARGET_TABLE`, `LOAD_OPERATION`,
+`START_DATE_VALUE`, `END_DATE_VALUE`, `NOTIFY_EMAIL`
+
+**Transformations:**
+
+1. **Source**: connection `jdbcv2.MSSQL.sqldb-p2o-intg.stg`, object `MATMAS_ROUTE_READER`, a view.
+2. **Filter**: `RUN_GROUP = $$RUN_GROUP AND ROW_NUM = $$ROW_ID`
+3. **Expression** `exp_SetParams`:
+   - **Variable ports**, one per route column:
+     ```
+     v_ROUTE_ID            = SETVARIABLE($$ROUTE_ID, ROUTE_ID)
+     v_ERP_SYSTEM          = SETVARIABLE($$ERP_SYSTEM, ERP_SYSTEM)
+     v_RUNTIME_ENVIRONMENT = SETVARIABLE($$RUNTIME_ENVIRONMENT, RUNTIME_ENVIRONMENT)
+     ... same for SOURCE_CONNECTION, SOURCE_DIRECTORY, FILE_PATTERN, SOURCE_ARCHIVE_DIRECTORY,
+         ONELAKE_CONNECTION, ONELAKE_DIRECTORY, TARGET_TABLE, LOAD_OPERATION,
+         START_DATE_VALUE, END_DATE_VALUE, NOTIFY_EMAIL
+     ```
+   - **Output ports** for a STARTED event:
+     `o_RUN_ID = $$RUN_ID`, `o_ROUTE_ID = ROUTE_ID`, `o_EVENT = 'STARTED'`, `o_MESSAGE = 'row ' || TO_CHAR(ROW_NUM) || ' of ' || TO_CHAR(TOTAL_ROUTES)`
+4. **Target**: same connection, object `MATMAS_RUN_LOG`, Insert. Map `o_RUN_ID`, `o_ROUTE_ID`, `o_EVENT`, `o_MESSAGE` to `RUN_ID`, `ROUTE_ID`, `EVENT`, `MESSAGE`.
+
+When `ROW_ID` is past the last row, the filter passes nothing. The parameters then keep the empty values the taskflow sent, which is how the taskflow knows the loop is finished.
+
+**Mapping task `mt_MATMAS_ROUTE_READER`** runs on the central runtime environment.
+
+---
+
+## 3. `fit_MATMAS_COLLECT`: agent folder to OneLake
+
+Create it in Data Integration, under New, then File Ingestion and Replication.
+
+| Setting | Value |
 |---|---|
-| Name | `FF_MATMAS` |
-| Type | Flat File |
-| Runtime environment | `US.US02.01` |
-| Directory | `C:\Informatica\SecureAgent\MATMAS\work` |
-| Date format | default |
-| Code page | UTF-8 |
-
-Only one file connection is needed for all ERPs. It points at the `work` folder, where the file list lives. The list holds full paths into `inbound\JDE`, `inbound\VISION` and any future ERP folder.
+| Runtime environment | Any source agent group, for example `US.US02.01`. It is overridden per row. |
+| Source | Local folder connection `LF_MATMAS_JDE`. Source directory and file pattern from the JDE row. Overridden per row. |
+| Target | `OL_MATMAS`, target directory `Files/matmas/inbound/JDE`. Overridden per row. |
+| Source options | Do not delete source files. Archiving happens after a successful load. Turn on skip duplicate files if your version offers it. |
+| Trigger | None. Not a file listener, because listener-based tasks cannot be used in a taskflow. |
 
 ---
 
-## 3. Build `m_MATMAS_LAND`
+## 4. `m_MATMAS_LOAD`: 6 fields plus dates into the ERP table
 
-New mapping `m_MATMAS_LAND` in project `zPF_TCS_Shubham`.
+**In-out parameters.** All are String with empty defaults:
 
-**Source**
-- Connection: `FF_MATMAS`.
-- Source type: **File List** (indirect). Object: `matmas_filelist.txt`.
-  The shipped `work\matmas_filelist.txt` points at `design\LANDING_TEMPLATE.txt`, which has 30 columns. This makes the designer create 30 fields. At run time the pre-processing command overwrites the list with the real files.
-- Formatting options: Delimited, delimiter `|`, text qualifier **None**, **Import column names from first line: off**, Rows to skip: 0, code page UTF-8.
-  The header of every file is landed on purpose as row 1, and `sp_Harmonize` checks it against the expected header of the route.
-- Fields: the designer names them `Field1 … Field30`, all string. Set precision to 1000 if it offers a smaller default.
-- Advanced: tick **Add Currently Processed Flat File Name Field**. This creates field `CurrentlyProcessedFileName`, which holds the full path. SQL routes each file by the name of its parent folder.
+`RUN_ID`, `ROUTE_ID`, `SRC_DIRECTORY` (default `Files/matmas/inbound/_design`), `START_DATE_VALUE`, `END_DATE_VALUE` (default `9999-12-31`)
 
-**Target**
-- Connection: `jdbcv2.MSSQL.sqldb-p2o-intg.stg`.
-- Object: existing `MATMAS_LANDING_RAW`. This is a view in schema `stg` whose columns are named `CurrentlyProcessedFileName`, `Field1 … Field30`.
-- Operation: Insert. Field mapping: **Automatic**. All 31 fields match by name.
-- Advanced: Truncate target off, Pre/Post SQL empty.
+**Transformations:**
 
-Validate and save.
+1. **Source**
+   - Connection `OL_MATMAS`, object `JDE_MATMAS_20261116.txt` from the `_design` folder.
+   - Format: delimited `|`, import column names from the first line, first data row 2, UTF-8.
+   - Advanced: Source type **Directory**, Directory override `$$SRC_DIRECTORY`. This reads every file the collect step put into this run's folder.
+   - If the connector offers a FileName field, add it.
+   - Property names differ slightly between the OneLake and ADLS Gen2 connectors. Use the directory read and directory override options of yours.
+2. **Expression** `exp_AddDates`. The six input ports are named from the file header, for example `ERP_Item_Number`, `Supplier_Part_`:
+   ```
+   o_RUN_ID                    = $$RUN_ID
+   o_ROUTE_ID                  = $$ROUTE_ID
+   o_SOURCE_FILE_NAME          = IIF(ISNULL(FileName), $$SRC_DIRECTORY, FileName)   -- or just $$SRC_DIRECTORY
+   o_ERP_ITEM_NUMBER           = LTRIM(RTRIM(<ERP Item Number>))
+   o_MATERIAL_DESCRIPTION      = LTRIM(RTRIM(<Material Description>))
+   o_PLANT_CODE                = LTRIM(RTRIM(<Plant Code>))
+   o_SUPPLIER_PART_NUMBER      = LTRIM(RTRIM(<Supplier Part#>))
+   o_SUPPLIER_NUMBER           = LTRIM(RTRIM(<Supplier Number>))
+   o_MANUFACTURING_PART_NUMBER = LTRIM(RTRIM(<Manufacturing Part#>))
+   o_START_DATE = IIF(LTRIM(RTRIM($$START_DATE_VALUE)) = '' OR ISNULL($$START_DATE_VALUE),
+                      TRUNC(SESSSTARTTIME, 'DD'),
+                      TO_DATE($$START_DATE_VALUE, 'YYYY-MM-DD'))
+   o_END_DATE   = TO_DATE(IIF(LTRIM(RTRIM($$END_DATE_VALUE)) = '' OR ISNULL($$END_DATE_VALUE),
+                              '9999-12-31', $$END_DATE_VALUE), 'YYYY-MM-DD')
+   ```
+   Start Date is the load date unless the config row sets `START_DATE_VALUE`. End Date is `9999-12-31` unless the row sets `END_DATE_VALUE`.
+3. **Filter**: drop blank lines with
+   `LENGTH(LTRIM(RTRIM(o_ERP_ITEM_NUMBER || o_MATERIAL_DESCRIPTION || o_PLANT_CODE || o_SUPPLIER_PART_NUMBER || o_SUPPLIER_NUMBER || o_MANUFACTURING_PART_NUMBER))) > 0`
+4. **Target**
+   - Connection `jdbcv2.MSSQL.sqldb-p2o-intg.stg`, object `MATMAS_MATERIAL_MASTER_STAGE`, Insert. Field mapping is automatic: strip the `o_` prefix or map by name.
+   - **Advanced, Post SQL**: `EXEC MATMAS.sp_MATMAS_ApplyStage`
+
+The Post SQL reads the route's `TARGET_TABLE`, `LOAD_OPERATION` and `KEY_COLUMNS` from the config. It then applies the staged rows in one transaction:
+
+| Operation | What happens |
+|---|---|
+| `INSERT` | Insert all valid rows |
+| `UPSERT` | Merge on the key columns. Update the existing row and keep its original Start Date. Insert new keys. |
+| `UPDATE` | Update matching keys only |
+| `DELETE` | Delete matching keys |
+| `TRUNCATE_INSERT` | Empty the table, then insert |
+
+In every mode:
+- A row missing a key is rejected to `MATERIAL_MASTER_REJECT`.
+- Exact duplicate lines are collapsed.
+- A file whose content was already loaded for this route is skipped as `DUPLICATE_FILE`.
+- If any route fails, the procedure raises an error so the mapping task shows **failed** in the monitor.
+
+**Mapping task `mt_MATMAS_LOAD`** runs on the central runtime environment.
 
 ---
 
-## 4. Mapping tasks
+## 5. `m_MATMAS_LOG`: write an event
 
-| Task | Mapping | Runtime env | Schedule tab |
+- **In-out parameters**, String: `RUN_ID`, `ROUTE_ID`, `EVENT`, `MESSAGE`, `FILE_COUNT` (default `0`).
+- **Source**: `MATMAS_ONE_ROW`, a view that always returns 1 row.
+- **Expression**: `o_RUN_ID = $$RUN_ID`, `o_ROUTE_ID = $$ROUTE_ID`, `o_EVENT = $$EVENT`, `o_MESSAGE = SUBSTR($$MESSAGE, 1, 4000)`, `o_FILE_COUNT = TO_INTEGER($$FILE_COUNT)`.
+- **Target**: `MATMAS_RUN_LOG`, Insert.
+- **Mapping task** `mt_MATMAS_LOG` runs on the central runtime environment.
+
+---
+
+## 6. Taskflow `tf_MATMAS_ORCHESTRATOR`
+
+**Start**
+- Input field: `RUN_GROUP` (Text, default `DAILY`).
+- Temporary fields, all Text unless noted: `RUN_ID`, `ROW_ID` (Integer), `ROUTE_ID`, `RUNTIME_ENVIRONMENT`, `SOURCE_CONNECTION`, `SOURCE_DIRECTORY`, `FILE_PATTERN`, `SOURCE_ARCHIVE_DIRECTORY`, `ONELAKE_CONNECTION`, `ONELAKE_DIRECTORY`, `RUN_FOLDER`, `START_DATE_VALUE`, `END_DATE_VALUE`.
+
+Read a Data Task's or Ingestion Task's outputs with the field picker. The formula it writes looks like `$temp.DT_ReadRoute[1]/output[1]/ROUTE_ID`.
+
+| # | Step | Type | Settings |
 |---|---|---|---|
-| `mt_MATMAS_LAND` | `m_MATMAS_LAND` | `US.US02.01` | **Pre-processing command**: `C:\Informatica\SecureAgent\MATMAS\scripts\matmas_prepare_filelist.cmd C:\Informatica\SecureAgent\MATMAS` |
-| `mt_MATMAS_PROCESS` | `m_MATMAS_PROCESS` | `US.US02.01` | **Post-processing command**: `C:\Informatica\SecureAgent\MATMAS\scripts\matmas_archive_files.cmd C:\Informatica\SecureAgent\MATMAS` |
+| 1 | `Init` | Assignment | `RUN_ID` (Formula) = `fn:format-dateTime(fn:adjust-dateTime-to-timezone(fn:current-dateTime(), xs:dayTimeDuration('PT0S')), '[Y0001][M01][D01][H01][m01][s01]')`. `ROW_ID` = `0`. |
+| 2 | `NextRow` | Assignment | `ROW_ID` = `$temp.ROW_ID + 1`. Set `ROUTE_ID` … `END_DATE_VALUE` to empty. |
+| 3 | `DT_ReadRoute` | Data Task → `mt_MATMAS_ROUTE_READER` | Inputs: `ROW_ID` = `$temp.ROW_ID`, `RUN_GROUP` = `$input.RUN_GROUP`, `RUN_ID` = `$temp.RUN_ID`. Every other in-out parameter = empty Content. That reset is needed because of the Max aggregation, per KB 000225868. On Error: Suspend. |
+| 4 | `TakeRoute` | Assignment | Copy each output (`ROUTE_ID`, `RUNTIME_ENVIRONMENT`, …) into its temp field. `RUN_FOLDER` = `concat($temp.ONELAKE_DIRECTORY, '/', $temp.RUN_ID)` |
+| 5 | `AnyRoute?` | Decision | `$temp.ROUTE_ID = ''` → **End**. Otherwise continue. |
+| 6 | `IT_Collect` | Ingestion Task → `fit_MATMAS_COLLECT` | Input fields: **Runtime Environment** = `$temp.RUNTIME_ENVIRONMENT`, **Source Connection** = `$temp.SOURCE_CONNECTION`, **Source Directory** = `$temp.SOURCE_DIRECTORY`, **File Pattern** = `$temp.FILE_PATTERN`, **Target Connection** = `$temp.ONELAKE_CONNECTION`, **Target Directory** = `$temp.RUN_FOLDER`. On Error: Custom → `DT_LogCollectFailed` → Jump to `NextRow`. |
+| 7 | `FilesFound?` | Decision | `IT_Collect` output **Success Files** `> 0` → step 8. Otherwise `DT_LogNoFile` → Jump to `NextRow`. |
+| 8 | `DT_Load` | Data Task → `mt_MATMAS_LOAD` | Inputs: `RUN_ID`, `ROUTE_ID`, `SRC_DIRECTORY` = `$temp.RUN_FOLDER`, `START_DATE_VALUE`, `END_DATE_VALUE`. On Error: Custom → `DT_LogLoadFailed` → Jump to `NextRow`. The source file is not archived, so the next run retries it. **Fail taskflow on completion**: on. |
+| 9 | `Archive?` | Decision | `$temp.SOURCE_ARCHIVE_DIRECTORY != ''` → step 10, otherwise step 11 |
+| 10 | `CT_ArchiveSource` | Command Task | **Runtime Environment** = Field `$temp.RUNTIME_ENVIRONMENT`. Script File Name = `C:\Informatica\scripts\matmas_archive_source.cmd`. Input Arguments = `concat('"', $temp.SOURCE_DIRECTORY, '" "', $temp.FILE_PATTERN, '" "', $temp.SOURCE_ARCHIVE_DIRECTORY, '" ', $temp.RUN_ID)`. On Error: Custom → `DT_LogArchiveFailed` → step 11. |
+| 11 | `LoopBack` | Jump | to `NextRow` |
+| – | `DT_Log…` steps | Data Task → `mt_MATMAS_LOG` | Inputs: `RUN_ID`, `ROUTE_ID`, `EVENT`, `MESSAGE`. EVENT is one of `NO_FILE`, `COLLECT_FAILED`, `LOAD_FAILED`, `ARCHIVE_FAILED`. For NO_FILE the MESSAGE is `concat('no file matching ', $temp.FILE_PATTERN, ' in ', $temp.SOURCE_DIRECTORY)`. For failures use the step's fault detail. On Error: Ignore. |
 
-On a Linux agent use the `.sh` scripts with the Linux path.
-
-What the scripts do:
-- **Prepare**: writes one line per `*.txt` and `*.csv` found in every sub-folder of `inbound`. If nothing is found, it lists an empty placeholder so the land task still succeeds with 0 rows.
-- **Archive**: moves only the listed files to `archive\<ERP folder>\<name>_<timestamp>.<ext>`. Files that arrive during the run stay for the next run.
-
----
-
-## 5. Taskflow `tf_MATMAS_DAILY`
-
-New taskflow, two steps:
-
-1. Data Task → `mt_MATMAS_LAND`. On error: **Stop**, because without landed data there is nothing to process.
-2. Data Task → `mt_MATMAS_PROCESS`.
-3. Optional Notification Task on failure, sent to the list in `MATMAS.CTL_PARAMETER` `NOTIFY_EMAIL`.
-
-Publish and schedule it, for example daily. A *Linear Taskflow* with the two tasks works as well.
+**Schedule**: Taskflow, then Schedule, daily or as needed. Different run groups can have their own schedules. Run them as separate taskflow instances with a different `RUN_GROUP` input to work in parallel.
 
 ---
 
-## 6. Run and check
+## 7. Run and check
 
 ```sql
--- outcome of the last runs (one row per route and stage)
-SELECT * FROM MATMAS.V_MATMAS_RUN_STATUS ORDER BY RUN_ID DESC, STAGE;
+-- what happened per route in the last runs
+SELECT * FROM MATMAS.V_MATMAS_RUN_STATUS ORDER BY RUN_ID DESC, ROUTE_ID;
 
--- the end table, same format as the JDE details
-SELECT * FROM MATMAS.MATERIAL_MASTER_TARGET;
+-- full event trail of one run
+SELECT * FROM MATMAS.CTL_MATMAS_RUN_LOG WHERE RUN_ID = '<RUN_ID>' ORDER BY LOG_ID;
 
--- rejected rows with reason and raw record
+-- the loaded data, one table per ERP
+SELECT * FROM MATMAS.JDE_MATERIAL_MASTER;
+SELECT * FROM MATMAS.VISION_MATERIAL_MASTER;
+
+-- rejected rows
 SELECT * FROM MATMAS.MATERIAL_MASTER_REJECT ORDER BY REJECT_ID DESC;
 
--- re-run one batch after fixing configuration (no file needed, data is kept in landing)
-EXEC MATMAS.sp_MATMAS_Reprocess @BatchId = '<BATCH_ID>';
+-- retry an APPLY_FAILED route after fixing its config
+EXEC MATMAS.sp_MATMAS_ReapplyRun '<RUN_ID>', '<ROUTE_ID>';
 ```
 
-`CTL_RUN_REQUEST.STATUS` values:
+Test plan in IDMC:
 
-| Status | Meaning |
-|---|---|
-| `SUCCESS` | All files routed, all routes harmonized and published |
-| `PARTIAL` | At least one step failed. The other routes still completed. Details are in `V_MATMAS_RUN_STATUS` |
-| `FAILED` | Every step failed, or the procedure itself failed |
-| `NO_DATA` | No files were found. Publish still ran |
-| `REQUESTED` and never changes | The Post SQL did not run. Check the target's Advanced settings |
-
----
-
-## 7. Test plan in CDI
-
-1. Reset with the commented block D at the end of `sql/04_test_without_cdi.sql`.
-2. Make sure `inbound\JDE\JDE_MATMAS.txt` and `inbound\VISION\VISION_MATMAS.txt` are on the agent.
-3. Run `mt_MATMAS_LAND` alone. Expect 7 rows in `MATMAS.LANDING_RAW` with `LOAD_STATUS = NEW` and full file paths.
-4. Run `mt_MATMAS_PROCESS` alone. Expect the same results as the SQL test, and both files moved to `archive`.
-5. Run `tf_MATMAS_DAILY` with no files present. Expect run status `NO_DATA`.
-6. Put a file with a wrong header in `inbound\JDE`. Expect `PARTIAL`, with a header-mismatch message on the JDE harmonize row while Vision still loads.
+1. Put `samples/JDE/JDE_MATMAS_20261116.txt` in the JDE agent's source folder.
+2. Run the taskflow with only `JDE_MATMAS` active.
+3. Expect these log events: `STARTED` → `LOADED` with inserted=1 and duplicates_collapsed=1. The source file should move to the archive folder.
+4. Run again with no file. Expect `STARTED` → `NO_FILE`.
+5. Put the same file back and run again. Expect `DUPLICATE_FILE`, and no change to the table.
+6. Activate `VISION_MATMAS`, set `TARGET_TABLE` to a table that does not exist, and run. Expect `APPLY_FAILED` and `LOAD_FAILED` for Vision. Other routes must still load. Fix the table name, then run `sp_MATMAS_ReapplyRun`.
 
 ---
 
-## 8. Phase 2: Vision through IDoc, and SAP targets
+## 8. Onboarding a new ERP or location
 
-Your reference mapping shows that Vision is SAP and that this org already reads IDocs from it. It uses connection `0140.SAP.VISION.IP.IDOC` (SAP ALE IDoc Reader) and an IDoc Interpreter mapplet.
+1. `EXEC MATMAS.sp_MATMAS_CreateErpTable N'<ERP>_MATERIAL_MASTER';`
+2. Insert one row into `MATMAS.CTL_MATMAS_ROUTE` with agent group, local folder connection, folder, pattern, OneLake folder, target table and operation.
+3. If it is a new agent group: create its local folder connection and copy the archive script to the agent.
 
-- **Vision material master through IDoc.** Generate an IDoc Interpreter mapplet for `MATMAS05` (or your extension) in the org, the same way `SAP IDoc Mapplet4` was made for `ZGRCOUPA01`. A mapping then writes the segments to segment tables in `stg`. Add a view per route that flattens the segments into the `COL01..` layout and a route row with `SOURCE_TYPE = 'IDOC'`. Harmonize, history and publish stay unchanged.
-- **Publishing to SAP.** Add an outbound route with `TARGET_TYPE = 'IDOC'`. `sp_Publish` reports it as skipped, and a publish mapping with an IDoc Prepare mapplet sends `MATMAS` to SAP through the IDoc writer connection.
-- **Moving to a share path.** Change the Directory of `FF_MATMAS` and the root path argument of the two commands. Nothing else changes.
+Nothing in the mappings, tasks or taskflow changes.

@@ -1,37 +1,27 @@
-# MATMAS – generalized Material Master integration (Informatica CDI + SQL database in Fabric)
+# MATMAS – config-driven Material Master ingestion (Informatica CDI + OneLake + Fabric SQL)
 
-One pipeline for every ERP. Files from JDE, Vision and any future ERP land through one CDI run. They are routed by folder name and harmonized by rules stored in control tables. The result is published to `MATMAS.MATERIAL_MASTER_TARGET` in the same format as the JDE details, plus Start Date and End Date.
+A scheduled cloud taskflow reads `MATMAS.CTL_MATMAS_ROUTE` row by row. For each row it copies the files from that row's Secure Agent folder into OneLake with one file ingestion task. It then loads them with one generic mapping, which adds Start Date and End Date to the 6 fields, into the ERP's own table, such as `MATMAS.JDE_MATERIAL_MASTER`. The operation comes from the config row. Finally it archives the source file on the agent.
 
 | Path | What it is |
 |---|---|
-| `01_MATMAS_Design.md` | Design: architecture, schema inventory, walk-through of the sample, onboarding a new ERP |
-| `sql/00_drop_all.sql` | DEV only: drops everything in schema MATMAS for a clean re-install |
-| `sql/01_schema_and_tables.sql` | Schema MATMAS: control, landing, canonical SCD2, reject, outbound log, target, monitoring views, and CDI interface views in `stg` |
-| `sql/02_procedures.sql` | `sp_MATMAS_Process` (entry point), `sp_MATMAS_Assign`, `sp_Harmonize`, `sp_Publish`, `sp_MATMAS_Reprocess` |
-| `sql/03_seed_config.sql` | JDE and Vision routes with field mappings, and the outbound route to the target table |
-| `sql/04_test_without_cdi.sql` | End-to-end test of the SQL side with the two sample files, expected results in comments |
-| `cdi/import/MATMAS_CDI_Import.zip` | **Import package** with mapping `m_MATMAS_PROCESS` for your org (project `zPF_TCS_Shubham`, connection `jdbcv2.MSSQL.sqldb-p2o-intg.stg`) |
-| `cdi/CDI_Build_Guide.md` | Import steps, build of `m_MATMAS_LAND`, mapping tasks, taskflow, test plan, phase 2 (Vision IDoc) |
-| `cdi/tools/build_cdi_package.py` | Regenerates the import package, modeled on your export `Mapping58-1794813874687.zip` |
-| `secure_agent/MATMAS/` | Folder tree for the Secure Agent: `inbound/JDE`, `inbound/VISION` with sample files, `work`, `design`, `archive`, `error`, `outbound`, `scripts` |
+| `01_MATMAS_Design.md` | Requirements, flow, objects, config columns, sample walk-through, decisions |
+| `cdi/CDI_Build_Guide.md` | Every CDI object with parameters, expressions and the taskflow step table |
+| `sql/01_tables.sql` | Config, run log, staging, reject, file history, ERP tables, views, `stg` interface views |
+| `sql/02_procedures.sql` | Apply (insert, upsert, update, delete, truncate-insert), retry, logging |
+| `sql/03_seed_config.sql` | JDE, Vision and SAP route rows. Replace the placeholder names |
+| `sql/04_test_without_cdi.sql` | SQL-only test of upsert, duplicate file, reject and retry, with expected results |
+| `sql/00_drop_all.sql` | DEV only: drops every object in schema MATMAS |
+| `agent_scripts/` | Archive script for the Command Task: `.cmd` and `.ps1` for Windows, `.sh` for Linux |
+| `samples/` | 6-field test files for JDE, Vision and SAP |
 
 Run order:
 
-1. On the Fabric SQL database, run `sql/01`, then `sql/02`, then `sql/03`.
-2. Run `sql/04` to prove the SQL side.
-3. Copy `secure_agent/MATMAS` to the agent at `C:\Informatica\SecureAgent\MATMAS`.
-4. Import `cdi/import/MATMAS_CDI_Import.zip`, keeping the existing connection.
-5. Build `m_MATMAS_LAND`, the two mapping tasks and the taskflow using the guide.
-6. Run the taskflow.
+1. On the Fabric SQL database, run `sql/01`, `sql/02` and `sql/03`, then fill in the real names.
+2. Run `sql/04`.
+3. Create the connections and the four tasks from the guide.
+4. Build the taskflow and schedule it.
 
-What was verified here:
-- The import package checksums verify, and its structure matches your export object for object.
-- The T-SQL parses, apart from constructs the parser does not support, such as `THROW` and `+=`.
-- The SQL that the procedures generate from the seed rows parses.
-- The Linux agent scripts ran end to end.
-
-What was not verified here:
-- The SQL was not executed, because no SQL Server is available in this workspace.
-- The import has not been tried in IDMC.
-
-Send any error message and it will be fixed.
+Verification status:
+- The SQL parses with a T-SQL parser. It has not been executed here, because no SQL Server is available.
+- The Linux archive script was tested: it archived the old file and left a file newer than the run start.
+- No CDI object was imported or run. There is no import package this time. The reader and load mappings need Filter and Expression transformations and a OneLake source, and the reference export contains none of those.

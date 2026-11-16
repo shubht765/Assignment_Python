@@ -1,0 +1,2 @@
+ERP Item Number|Material Description|Plant Code|Supplier Part#|Supplier Number|Manufacturing Part#
+000000000040012345|PROX SENSOR M18 PNP|1010|BES0123 (Primary)|0000100234|BES M18MI-PSC80B (Primary)
