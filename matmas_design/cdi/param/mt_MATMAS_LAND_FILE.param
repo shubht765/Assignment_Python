@@ -1,8 +1,0 @@
-#USE_SECTIONS
-# Parameter file for running mt_MATMAS_LAND_FILE stand-alone (outside the taskflow).
-# In the taskflow these values are overridden per iteration from CTL_INBOUND_INTEGRATION.
-[Default].[mt_MATMAS_LAND_FILE]
-$$SRC_CONN=FF_MATMAS_JDE
-$$SRC_OBJECT=JDE_MATMAS.txt
-$$BATCH_ID=20261116000000
-$$INTEGRATION_ID=IN_JDE_MATMAS_FILE

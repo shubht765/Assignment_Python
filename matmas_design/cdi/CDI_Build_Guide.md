@@ -1,193 +1,159 @@
-# MATMAS – Informatica CDI build guide (click-level)
+# MATMAS – Informatica CDI guide (import + build)
 
-Everything the Informatica side needs: 3 connections, 2 mappings, 2 mapping tasks, 1 taskflow.
-All business logic lives in the Fabric SQL database (`sql/02_procedures.sql`), so these objects never change when a new ERP or target is added.
+The whole CDI side is **2 mappings, 2 mapping tasks, 1 taskflow**. None of them is ERP specific. A new ERP is a new folder plus rows in the control tables.
 
-> Why no import zip: an IICS export package is internal object JSON stamped with org/tenant GUIDs, mapping-engine metadata and version numbers that only Informatica itself generates. A hand-written one does not import. Build the objects below once (about an hour), then **export them from your org** and keep that zip in `cdi/export/` as the reusable package.
+| Object | How you get it | What it does |
+|---|---|---|
+| `m_MATMAS_PROCESS` | **Import** `cdi/import/MATMAS_CDI_Import.zip` | Inserts one run request through `stg.MATMAS_RUN_REQUEST`. Its target Post SQL runs `EXEC MATMAS.sp_MATMAS_Process`: route files, harmonize, history, publish |
+| `m_MATMAS_LAND` | Build (2 transformations, about 10 minutes) | Reads **every file in every ERP folder** in one run (indirect file list) into `stg.MATMAS_LANDING_RAW` |
+| `mt_MATMAS_LAND` | Create on the mapping | Pre-processing command builds the file list |
+| `mt_MATMAS_PROCESS` | Create on the mapping | Post-processing command archives the processed files |
+| `tf_MATMAS_DAILY` | Create (2 Data Tasks) | Runs land, then process. Schedule it |
+
+How the import package was made: it follows the exact structure of your export `Mapping58-1794813874687.zip`. That covers the manifest, the SHA-256 checksum file, the DTEMPLATE zip and the class table. It reuses your JDBC V2 connection `jdbcv2.MSSQL.sqldb-p2o-intg.stg` (GUID `1AIvTtPhmimhpwYPfj4G2j`) on runtime environment `US.US02.01`. It is regenerated with `cdi/tools/build_cdi_package.py`.
+
+The land mapping is not in the package. A flat-file source stores its format in a separate file-format object that your reference export does not contain, and a guessed one would not import. Export any small flat-file mapping from your org and send it to me, and the land mapping will be added to the package the same way.
 
 ---
 
 ## 0. Prerequisites
 
-1. Run `sql/01_schema_and_tables.sql`, `sql/02_procedures.sql`, `sql/03_seed_config.sql` on the Fabric SQL database.
-   If `STRING_SPLIT(..., 1)` errors, the database compatibility level is below 160:
-   `ALTER DATABASE CURRENT SET COMPATIBILITY_LEVEL = 160;`
-2. Run `sql/04_test_without_cdi.sql` once. If it ends with 3 rows in `MATMAS.MATERIAL_MASTER_TARGET` and 1 reject, the SQL side is proven before you touch CDI.
-3. Copy `secure_agent/MATMAS` to the Secure Agent machine (default assumed: `C:\Informatica\SecureAgent\MATMAS`). If you use another path, update `SOURCE_FOLDER` / `ARCHIVE_FOLDER` in `MATMAS.CTL_INBOUND_INTEGRATION`.
-4. Copy `cdi/scripts/archive_file.cmd` (Windows agent) or `archive_file.sh` (Linux agent) to `<agent>\MATMAS\scripts\`.
-5. The Secure Agent service account needs read/write on the MATMAS folder.
+1. Run on the Fabric SQL database, in order: `sql/01_schema_and_tables.sql`, `sql/02_procedures.sql`, `sql/03_seed_config.sql`.
+   If `STRING_SPLIT(..., 1)` errors, raise the compatibility level once: `ALTER DATABASE CURRENT SET COMPATIBILITY_LEVEL = 160;`
+2. Run `sql/04_test_without_cdi.sql`. It must end with run status `SUCCESS`, 3 rows in `MATMAS.MATERIAL_MASTER_TARGET` and 1 reject. This proves the SQL side before CDI is involved.
+3. The service principal used by the JDBC V2 connection needs on the database: `SELECT, INSERT` on schema `stg`, and `EXECUTE` on schema `MATMAS`. The procedures run with the owner's rights for the tables they touch (ownership chaining inside schema MATMAS), but if your schemas have different owners also grant `SELECT, INSERT, UPDATE, DELETE` on schema `MATMAS`. `sp_Publish` truncates the target table, which needs `ALTER` on that table.
+4. Copy `secure_agent/MATMAS` to the Secure Agent machine of runtime environment `US.US02.01`. Default path used everywhere: `C:\Informatica\SecureAgent\MATMAS`. The agent service account needs read/write there.
 
 ---
 
-## 1. Connections (Administrator → Connections)
+## 1. Import `m_MATMAS_PROCESS`
 
-| Name | Type | Settings |
-|---|---|---|
-| `SQL_MATMAS` | Microsoft SQL Server | Server: `<workspace>.database.fabric.microsoft.com`, port 1433, Database: your Fabric SQL DB, Authentication: Microsoft Entra (service principal or user) or SQL auth if enabled, Encryption: on, Schema: `MATMAS`, Runtime env: your Secure Agent group |
-| `FF_MATMAS_JDE` | Flat File | Directory: `C:\Informatica\SecureAgent\MATMAS\inbound\JDE`, Date format: `YYYY-MM-DD`, Code page: UTF-8 |
-| `FF_MATMAS_VISION` | Flat File | Directory: `C:\Informatica\SecureAgent\MATMAS\inbound\VISION`, Code page: UTF-8 |
-| `FF_MATMAS_TEMPLATE` | Flat File | Directory: `C:\Informatica\SecureAgent\MATMAS\inbound\_template` (design time only) |
+1. Data Integration → **Explore** → **Import** → select `cdi/import/MATMAS_CDI_Import.zip`.
+2. Objects listed: `m_MATMAS_PROCESS` (mapping, project `zPF_TCS_Shubham`), connection `jdbcv2.MSSQL.sqldb-p2o-intg.stg`, runtime environment `US.US02.01`, project `zPF_TCS_Shubham`.
+3. **Do not overwrite the connection or the runtime environment.** Choose the existing ones, or deselect them. The connection in the package has no password on purpose, so overwriting it would blank the password in your org.
+4. Import. Open `m_MATMAS_PROCESS` and click **Validate**.
+5. Check the target: Target → **Advanced** → *Post SQL* = `EXEC MATMAS.sp_MATMAS_Process`.
 
-Every new ERP = one new flat-file connection pointing at its folder + one row in `CTL_INBOUND_INTEGRATION` whose `SOURCE_CONNECTION` is that name. When files move to a share, only the directories change.
+If the import reports an error, send me the exact message. The package is generated, so a fix is a re-run of the script.
 
----
+Manual equivalent, if you prefer to build it:
 
-## 2. Mapping `m_MATMAS_LAND_FILE`  (any file → `MATMAS.LANDING_RAW`)
-
-**Parameters** (Mapping → Parameters panel):
-
-| Name | Type | Default | Override at runtime |
-|---|---|---|---|
-| `$$SRC_CONN` | Connection (Flat File) | `FF_MATMAS_TEMPLATE` | Yes |
-| `$$SRC_OBJECT` | Data object (source) | `LANDING_TEMPLATE.txt` | Yes |
-| `$$BATCH_ID` | String, In-Out | `00000000000000` | Yes |
-| `$$INTEGRATION_ID` | String, In-Out | `IN_JDE_MATMAS_FILE` | Yes |
-
-**Source** `src_File`
-- Connection: `$$SRC_CONN`; Object: `$$SRC_OBJECT`.
-- At design time pick `FF_MATMAS_TEMPLATE` / `LANDING_TEMPLATE.txt` so the field list is `COL01..COL30`, then switch both to the parameters.
-- Formatting options: Delimiter `|`, Text qualifier: none, **Import field names from first line: OFF**, Rows to skip: **0** (the header is landed as row 1 on purpose; `sp_Harmonize` validates it), Code page UTF-8.
-- Fields: `COL01..COL30` string(1000). Files with fewer than 30 columns land NULL in the rest.
-- Advanced: set "Allow schema mismatch / fewer columns" tolerant options if your version shows them.
-
-**Sequence Generator** `seq_RowNum`: NEXTVAL, Start 1, Reset on run = Yes. Keep the mapping single-partition so row 1 is the header.
-
-**Expression** `exp_Audit` (passes COL01..COL30 through) and adds:
-
-| Port | Expression |
-|---|---|
-| `o_BATCH_ID` (string 40) | `$$BATCH_ID` |
-| `o_INTEGRATION_ID` (string 60) | `$$INTEGRATION_ID` |
-| `o_SRC_FILE_NAME` (string 300) | `$$SRC_OBJECT` (or the built-in `CurrentlyProcessedFileName` field if you enable it on the source) |
-| `o_SRC_ROW_NUM` (integer) | `NEXTVAL` from `seq_RowNum` |
-
-**Target** `tgt_LANDING_RAW`
-- Connection `SQL_MATMAS`, object `MATMAS.LANDING_RAW`, operation Insert.
-- Field mapping: Automatic / Smart match (`o_BATCH_ID→BATCH_ID`, `o_SRC_ROW_NUM→SRC_ROW_NUM`, `COLnn→COLnn`). Leave `LANDING_ID`, `LOAD_TS`, `LOAD_STATUS` unmapped (defaults).
-- Advanced: Truncate target = No, Update override: none.
+- **Source**: connection `jdbcv2.MSSQL.sqldb-p2o-intg.stg`, single object `MATMAS_RUN_REQUEST_SRC` (a view in schema `stg`).
+- **Target**: same connection, existing object `MATMAS_RUN_REQUEST`, operation Insert, field mapping Automatic.
+- Target **Advanced → Post SQL**: `EXEC MATMAS.sp_MATMAS_Process`.
 
 ---
 
-## 3. Mapping `m_MATMAS_EXEC_SQL`  (calls `MATMAS.sp_MATMAS_Run`, returns one row)
+## 2. Connection for the files: `FF_MATMAS`
 
-**Parameters** (all String, In-Out, Override at runtime = Yes):
+Administrator → Connections → New:
 
-| Name | Default (used at design time to import the result metadata) |
+| Property | Value |
 |---|---|
-| `$$STAGE` | `GET_IN_ROUTE` |
-| `$$RUN_GROUP` | `DAILY` |
-| `$$ITERATION` | `1` |
-| `$$BATCH_ID` | `00000000000000` |
-| `$$INTEGRATION_ID` | *(empty)* |
-| `$$ROWS_READ` | `0` |
-| `$$ROWS_LOADED` | `0` |
-| `$$MESSAGE` | *(empty)* |
+| Name | `FF_MATMAS` |
+| Type | Flat File |
+| Runtime environment | `US.US02.01` |
+| Directory | `C:\Informatica\SecureAgent\MATMAS\work` |
+| Date format | default |
+| Code page | UTF-8 |
 
-Output in-out parameters (String, written by the Expression with SetVariable):
-`$$OUT_STATUS`, `$$OUT_MESSAGE`, `$$OUT_INTEGRATION_ID`, `$$OUT_SOURCE_SYSTEM`, `$$OUT_SRC_CONN`, `$$OUT_SRC_OBJECT`, `$$OUT_SRC_FOLDER`, `$$OUT_ARC_FOLDER`, `$$OUT_TGT_CONN`, `$$OUT_TGT_OBJECT`, `$$OUT_TGT_TYPE`, `$$OUT_TOTAL_ROUTES`, `$$OUT_ROWS_READ`, `$$OUT_ROWS_INSERTED`, `$$OUT_ROWS_UPDATED`, `$$OUT_ROWS_REJECTED`.
+Only one file connection is needed for all ERPs. It points at the `work` folder, where the file list lives. The list holds full paths into `inbound\JDE`, `inbound\VISION` and any future ERP folder.
 
-**Source** `src_RunProc`
-- Connection `SQL_MATMAS`, Source type: **Query**, query:
+---
 
-```sql
-SET NOCOUNT ON;
-EXEC MATMAS.sp_MATMAS_Run
-     @Stage         = '$$STAGE',
-     @BatchId       = '$$BATCH_ID',
-     @RunGroup      = '$$RUN_GROUP',
-     @Iteration     = $$ITERATION,
-     @IntegrationId = '$$INTEGRATION_ID',
-     @RowsRead      = $$ROWS_READ,
-     @RowsLoaded    = $$ROWS_LOADED,
-     @Message       = '$$MESSAGE'
-```
+## 3. Build `m_MATMAS_LAND`
 
-- Click "Validate / Select fields": with the defaults the proc returns the 16 columns `STATUS … ROWS_REJECTED`. If your connector version refuses `EXEC` in a custom query, use a SQL transformation (type: SQL query, same text, "Query has output ports" = yes) fed by a one-row dummy source `SELECT 1 AS DUMMY`.
+New mapping `m_MATMAS_LAND` in project `zPF_TCS_Shubham`.
 
-**Expression** `exp_SetOut`: one variable port per output, e.g.
+**Source**
+- Connection: `FF_MATMAS`.
+- Source type: **File List** (indirect). Object: `matmas_filelist.txt`.
+  The shipped `work\matmas_filelist.txt` points at `design\LANDING_TEMPLATE.txt`, which has 30 columns. This makes the designer create 30 fields. At run time the pre-processing command overwrites the list with the real files.
+- Formatting options: Delimited, delimiter `|`, text qualifier **None**, **Import column names from first line: off**, Rows to skip: 0, code page UTF-8.
+  The header of every file is landed on purpose as row 1, and `sp_Harmonize` checks it against the expected header of the route.
+- Fields: the designer names them `Field1 … Field30`, all string. Set precision to 1000 if it offers a smaller default.
+- Advanced: tick **Add Currently Processed Flat File Name Field**. This creates field `CurrentlyProcessedFileName`, which holds the full path. SQL routes each file by the name of its parent folder.
 
-| Variable port | Expression |
-|---|---|
-| `v_STATUS` | `SetVariable($$OUT_STATUS, STATUS)` |
-| `v_MESSAGE` | `SetVariable($$OUT_MESSAGE, MESSAGE)` |
-| `v_INTEGRATION_ID` | `SetVariable($$OUT_INTEGRATION_ID, INTEGRATION_ID)` |
-| `v_SRC_CONN` | `SetVariable($$OUT_SRC_CONN, SOURCE_CONNECTION)` |
-| `v_SRC_OBJECT` | `SetVariable($$OUT_SRC_OBJECT, SOURCE_OBJECT)` |
-| `v_SRC_FOLDER` | `SetVariable($$OUT_SRC_FOLDER, SOURCE_FOLDER)` |
-| `v_ARC_FOLDER` | `SetVariable($$OUT_ARC_FOLDER, ARCHIVE_FOLDER)` |
-| `v_TGT_CONN` | `SetVariable($$OUT_TGT_CONN, TARGET_CONNECTION)` |
-| `v_TGT_OBJECT` | `SetVariable($$OUT_TGT_OBJECT, TARGET_OBJECT)` |
-| `v_TGT_TYPE` | `SetVariable($$OUT_TGT_TYPE, TARGET_TYPE)` |
-| `v_TOTAL` | `SetVariable($$OUT_TOTAL_ROUTES, TO_CHAR(TOTAL_ROUTES))` |
-| `v_ROWS_*` | `SetVariable($$OUT_ROWS_READ, TO_CHAR(ROWS_READ))` etc. |
+**Target**
+- Connection: `jdbcv2.MSSQL.sqldb-p2o-intg.stg`.
+- Object: existing `MATMAS_LANDING_RAW`. This is a view in schema `stg` whose columns are named `CurrentlyProcessedFileName`, `Field1 … Field30`.
+- Operation: Insert. Field mapping: **Automatic**. All 31 fields match by name.
+- Advanced: Truncate target off, Pre/Post SQL empty.
 
-Plus pass-through output ports for all 16 columns and `o_STAGE = $$STAGE`, `o_ITERATION = TO_INTEGER($$ITERATION)`, `o_BATCH_ID = $$BATCH_ID`.
-
-**Target** `tgt_STEP_RESULT`: `SQL_MATMAS` / `MATMAS.CTL_STEP_RESULT`, Insert, map by name (`o_STAGE→STAGE`, `o_ITERATION→ITERATION`, `o_BATCH_ID→BATCH_ID`, rest by name). This gives you a full trace of every taskflow step.
+Validate and save.
 
 ---
 
 ## 4. Mapping tasks
 
-| Task | Mapping | Settings |
-|---|---|---|
-| `mt_MATMAS_LAND_FILE` | `m_MATMAS_LAND_FILE` | Runtime env: Secure Agent group. In-Out parameters: all "Allow override". Connection/object parameters: "Allow parameter to be overridden at run time" = Yes. Error handling: Stop on errors = 1. Optional parameter file for stand-alone tests: `cdi/param/mt_MATMAS_LAND_FILE.param` (copy to `<agent>/apps/Data_Integration_Server/data/userparameters/`). |
-| `mt_MATMAS_EXEC_SQL` | `m_MATMAS_EXEC_SQL` | Same. In-Out params: "Allow override" on all `$$STAGE…$$MESSAGE`. The `$$OUT_*` parameters appear automatically as output fields of the Data Task in the taskflow. |
-
----
-
-## 5. Taskflow `tf_MATMAS_ORCHESTRATOR`
-
-**Input fields**: `RUN_GROUP` (text, default `DAILY`), `INTEGRATION_ID` (text, default empty: run a single route when set).
-**Temp fields**: `BATCH_ID` (text), `I` (integer), `TOTAL` (integer), `ROUTE_ID`, `SRC_CONN`, `SRC_OBJECT`, `SRC_FOLDER`, `ARC_FOLDER`, `TGT_TYPE`, `STATUS`, `MSG` (text), `ROWS_READ`, `ROWS_LOADED` (integer).
-
-Steps in order (step names are what you type in the designer):
-
-| # | Step | Type | What to set |
+| Task | Mapping | Runtime env | Schedule tab |
 |---|---|---|---|
-| 1 | `Init` | Assignment | `BATCH_ID = fn:replace(fn:replace(fn:replace(string(fn:current-dateTime()), '-', ''), ':', ''), 'T', '')` then keep first 14 chars with `substring(…, 1, 14)`; `I = 1` |
-| 2 | `GetInRoute` | Data Task → `mt_MATMAS_EXEC_SQL` | Input overrides: `STAGE = 'GET_IN_ROUTE'`, `RUN_GROUP = $input.RUN_GROUP`, `ITERATION = $temp.I`, `INTEGRATION_ID = $input.INTEGRATION_ID`. In **Fields**, map outputs: `OUT_STATUS→$temp.STATUS`, `OUT_INTEGRATION_ID→ROUTE_ID`, `OUT_SRC_CONN→SRC_CONN`, `OUT_SRC_OBJECT→SRC_OBJECT`, `OUT_SRC_FOLDER→SRC_FOLDER`, `OUT_ARC_FOLDER→ARC_FOLDER`, `OUT_TOTAL_ROUTES→TOTAL` (use the Fields pane picker, it writes the correct `$…` reference). |
-| 3 | `AnyInbound?` | Decision on `$temp.STATUS` | `= 'NONE'` → go to step 10 (`OutInit`); otherwise continue. |
-| 4 | `LandStart` | Data Task → `mt_MATMAS_EXEC_SQL` | `STAGE='LAND_START'`, `BATCH_ID=$temp.BATCH_ID`, `INTEGRATION_ID=$temp.ROUTE_ID` |
-| 5 | `Land` | Data Task → `mt_MATMAS_LAND_FILE` | Input overrides: connection parameter `SRC_CONN = $temp.SRC_CONN` (type the connection **name**), `SRC_OBJECT = $temp.SRC_OBJECT`, `BATCH_ID`, `INTEGRATION_ID = $temp.ROUTE_ID`. Error handling: **Custom** → on error go to `Fail`. Map outputs `Success Source Rows→$temp.ROWS_READ`, `Success Target Rows→$temp.ROWS_LOADED`. |
-| 6 | `LandEnd` | Data Task → `mt_MATMAS_EXEC_SQL` | `STAGE='LAND_END'`, `ROWS_READ=$temp.ROWS_READ`, `ROWS_LOADED=$temp.ROWS_LOADED`, batch + route as above |
-| 7 | `Harmonize` | Data Task → `mt_MATMAS_EXEC_SQL` | `STAGE='HARMONIZE'`, batch + route. Map `OUT_STATUS→$temp.STATUS`, `OUT_MESSAGE→$temp.MSG`. |
-| 7a | `HarmonizeOK?` | Decision on `$temp.STATUS` | `= 'OK'` → step 8; else → `Notify` (stage already logged FAILED by SQL) then step 9 |
-| 8 | `Archive` | Command Task | Script `C:\Informatica\SecureAgent\MATMAS\scripts\archive_file.cmd`, arguments: `"$temp.SRC_FOLDER" "$temp.SRC_OBJECT" "$temp.ARC_FOLDER" "$temp.BATCH_ID"`. Error handling: ignore (archiving must not fail the run). |
-| 9 | `NextIn` | Assignment | `I = $temp.I + 1` |
-| 9a | `MoreIn?` | Decision | `$temp.I <= $temp.TOTAL` → **Jump** to step 2 `GetInRoute`; else continue |
-| 10 | `OutInit` | Assignment | `I = 1` |
-| 11 | `GetOutRoute` | Data Task → `mt_MATMAS_EXEC_SQL` | `STAGE='GET_OUT_ROUTE'`, `ITERATION=$temp.I`, `RUN_GROUP`, `INTEGRATION_ID=$input.INTEGRATION_ID`. Map `OUT_STATUS`, `OUT_INTEGRATION_ID→ROUTE_ID`, `OUT_TGT_TYPE→TGT_TYPE`, `OUT_TOTAL_ROUTES→TOTAL`. |
-| 12 | `AnyOutbound?` | Decision on `$temp.STATUS` | `= 'NONE'` → `End` |
-| 13 | `TargetType?` | Decision on `$temp.TGT_TYPE` | `= 'TABLE'` → step 14; `= 'FILE'` → (future) Data Task `mt_MATMAS_PUBLISH_FILE` + Command task SFTP; `= 'IDOC'`/`'API'` → (future) protocol mapping |
-| 14 | `Publish` | Data Task → `mt_MATMAS_EXEC_SQL` | `STAGE='PUBLISH'`, batch + route. Map `OUT_STATUS`, `OUT_MESSAGE`. On `FAILED` → `Notify`. |
-| 15 | `NextOut` | Assignment + Decision | `I = $temp.I + 1`; `$temp.I <= $temp.TOTAL` → Jump to step 11 |
-| 16 | `End` | End | |
-| F | `Fail` | Data Task → `mt_MATMAS_EXEC_SQL` | `STAGE='FAIL'`, `MESSAGE = $temp.MSG` (or the error text from the failed task's output), batch + route; then `Notify` (Notification Task, e-mail from `CTL_PARAMETER NOTIFY_EMAIL`), then **continue to step 9** so one bad file never blocks the other ERPs. |
+| `mt_MATMAS_LAND` | `m_MATMAS_LAND` | `US.US02.01` | **Pre-processing command**: `C:\Informatica\SecureAgent\MATMAS\scripts\matmas_prepare_filelist.cmd C:\Informatica\SecureAgent\MATMAS` |
+| `mt_MATMAS_PROCESS` | `m_MATMAS_PROCESS` | `US.US02.01` | **Post-processing command**: `C:\Informatica\SecureAgent\MATMAS\scripts\matmas_archive_files.cmd C:\Informatica\SecureAgent\MATMAS` |
 
-Notes
-- A Data Task's overridable connection parameter takes the connection **name** as a string. That is how one `mt_MATMAS_LAND_FILE` reads from `FF_MATMAS_JDE` in iteration 1 and `FF_MATMAS_VISION` in iteration 2.
-- Jump steps make the loop. There is no native "for each" step in taskflows; this is the supported pattern.
-- Schedule: Taskflow → Schedule, daily. Or trigger from a **File Listener** on the inbound folder and pass the listener's file name into `INTEGRATION_ID` after a small lookup (later).
-- Re-run one route by hand: run the taskflow with `INTEGRATION_ID = IN_JDE_MATMAS_FILE`.
+On a Linux agent use the `.sh` scripts with the Linux path.
+
+What the scripts do:
+- **Prepare**: writes one line per `*.txt` and `*.csv` found in every sub-folder of `inbound`. If nothing is found, it lists an empty placeholder so the land task still succeeds with 0 rows.
+- **Archive**: moves only the listed files to `archive\<ERP folder>\<name>_<timestamp>.<ext>`. Files that arrive during the run stay for the next run.
 
 ---
 
-## 6. Test plan (in order)
+## 5. Taskflow `tf_MATMAS_DAILY`
 
-1. `sql/04_test_without_cdi.sql` → 3 rows in `MATERIAL_MASTER_TARGET`, 1 reject (`INVALID START_DATE` for V-20002), exact duplicate of 109589 collapsed.
-2. `TRUNCATE` `LANDING_RAW`, `MATERIAL_MASTER`, `MATERIAL_MASTER_REJECT`, `MATERIAL_MASTER_OUTBOUND`, `MATERIAL_MASTER_TARGET`, `CTL_BATCH_RUN`, `CTL_STEP_RESULT` and run `mt_MATMAS_LAND_FILE` alone with the parameter file → 3 rows in `LANDING_RAW` for the JDE batch, row 1 = header.
-3. Run `mt_MATMAS_EXEC_SQL` alone (defaults) → one row in `CTL_STEP_RESULT` with `STATUS = OK`, `INTEGRATION_ID = IN_JDE_MATMAS_FILE`, `TOTAL_ROUTES = 2`.
-4. Run `tf_MATMAS_ORCHESTRATOR` → check `CTL_BATCH_RUN` (LAND, HARMONIZE × 2 routes, PUBLISH), `CTL_STEP_RESULT` trace, files moved to `archive\`.
-5. Change a description in `JDE_MATMAS.txt`, re-run → one closed version + one new version in `MATERIAL_MASTER`, target reloaded.
+New taskflow, two steps:
+
+1. Data Task → `mt_MATMAS_LAND`. On error: **Stop**, because without landed data there is nothing to process.
+2. Data Task → `mt_MATMAS_PROCESS`.
+3. Optional Notification Task on failure, sent to the list in `MATMAS.CTL_PARAMETER` `NOTIFY_EMAIL`.
+
+Publish and schedule it, for example daily. A *Linear Taskflow* with the two tasks works as well.
 
 ---
 
-## 7. Adding ERP "XYZ" later (no CDI change)
+## 6. Run and check
 
-1. Folder `MATMAS\inbound\XYZ`, flat-file connection `FF_MATMAS_XYZ`.
-2. `INSERT INTO MATMAS.CTL_SOURCE_SYSTEM`.
-3. `INSERT INTO MATMAS.CTL_INBOUND_INTEGRATION` (`SOURCE_CONNECTION='FF_MATMAS_XYZ'`, `SOURCE_OBJECT='XYZ_MATMAS.txt'`, `EXPECTED_HEADER` = its header line).
-4. `INSERT INTO MATMAS.CTL_FIELD_MAPPING` rows `COLnn → canonical`.
-5. Optional view `MATMAS.MATERIAL_MASTER_XYZ` over `LANDING_RAW` for the business.
-6. Drop the file, run the taskflow with `INTEGRATION_ID='IN_XYZ_MATMAS_FILE'`.
+```sql
+-- outcome of the last runs (one row per route and stage)
+SELECT * FROM MATMAS.V_MATMAS_RUN_STATUS ORDER BY RUN_ID DESC, STAGE;
+
+-- the end table, same format as the JDE details
+SELECT * FROM MATMAS.MATERIAL_MASTER_TARGET;
+
+-- rejected rows with reason and raw record
+SELECT * FROM MATMAS.MATERIAL_MASTER_REJECT ORDER BY REJECT_ID DESC;
+
+-- re-run one batch after fixing configuration (no file needed, data is kept in landing)
+EXEC MATMAS.sp_MATMAS_Reprocess @BatchId = '<BATCH_ID>';
+```
+
+`CTL_RUN_REQUEST.STATUS` values:
+
+| Status | Meaning |
+|---|---|
+| `SUCCESS` | All files routed, all routes harmonized and published |
+| `PARTIAL` | At least one step failed. The other routes still completed. Details are in `V_MATMAS_RUN_STATUS` |
+| `FAILED` | Every step failed, or the procedure itself failed |
+| `NO_DATA` | No files were found. Publish still ran |
+| `REQUESTED` and never changes | The Post SQL did not run. Check the target's Advanced settings |
+
+---
+
+## 7. Test plan in CDI
+
+1. Reset with the commented block D at the end of `sql/04_test_without_cdi.sql`.
+2. Make sure `inbound\JDE\JDE_MATMAS.txt` and `inbound\VISION\VISION_MATMAS.txt` are on the agent.
+3. Run `mt_MATMAS_LAND` alone. Expect 7 rows in `MATMAS.LANDING_RAW` with `LOAD_STATUS = NEW` and full file paths.
+4. Run `mt_MATMAS_PROCESS` alone. Expect the same results as the SQL test, and both files moved to `archive`.
+5. Run `tf_MATMAS_DAILY` with no files present. Expect run status `NO_DATA`.
+6. Put a file with a wrong header in `inbound\JDE`. Expect `PARTIAL`, with a header-mismatch message on the JDE harmonize row while Vision still loads.
+
+---
+
+## 8. Phase 2: Vision through IDoc, and SAP targets
+
+Your reference mapping shows that Vision is SAP and that this org already reads IDocs from it. It uses connection `0140.SAP.VISION.IP.IDOC` (SAP ALE IDoc Reader) and an IDoc Interpreter mapplet.
+
+- **Vision material master through IDoc.** Generate an IDoc Interpreter mapplet for `MATMAS05` (or your extension) in the org, the same way `SAP IDoc Mapplet4` was made for `ZGRCOUPA01`. A mapping then writes the segments to segment tables in `stg`. Add a view per route that flattens the segments into the `COL01..` layout and a route row with `SOURCE_TYPE = 'IDOC'`. Harmonize, history and publish stay unchanged.
+- **Publishing to SAP.** Add an outbound route with `TARGET_TYPE = 'IDOC'`. `sp_Publish` reports it as skipped, and a publish mapping with an IDoc Prepare mapplet sends `MATMAS` to SAP through the IDoc writer connection.
+- **Moving to a share path.** Change the Directory of `FF_MATMAS` and the root path argument of the two commands. Nothing else changes.

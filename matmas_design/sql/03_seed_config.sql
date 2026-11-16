@@ -1,6 +1,7 @@
 /* =====================================================================
    MATMAS - 03: seed configuration
-   Systems, canonical column list, JDE + VISION inbound routes with their
+   Systems, canonical column list, JDE + VISION inbound routes (routed by
+   sub-folder MATMAS\inbound\JDE and MATMAS\inbound\VISION) with their
    field mappings, one outbound route to MATMAS.MATERIAL_MASTER_TARGET.
    Re-runnable: deletes and re-inserts its own rows.
    ===================================================================== */
@@ -9,11 +10,11 @@ SET NOCOUNT ON;
 /* 1. systems ---------------------------------------------------------- */
 MERGE MATMAS.CTL_SOURCE_SYSTEM AS t
 USING (VALUES
-  ('JDE',    N'JD Edwards EnterpriseOne', 'ERP', 23),
-  ('VISION', N'Vision ERP',               'ERP', 103),
-  ('SAP',    N'SAP S/4HANA',              'ERP', 23),
-  ('COUPA',  N'Coupa (SimplyBuy)',        'P2P', 23),
-  ('MATMAS', N'Material master hub (this database)', 'MDM', 23)
+  ('JDE',    N'JD Edwards EnterpriseOne',             'ERP', 23),
+  ('VISION', N'Vision (SAP)',                         'ERP', 103),
+  ('SAP',    N'SAP S/4HANA',                          'ERP', 23),
+  ('COUPA',  N'Coupa (SimplyBuy)',                    'P2P', 23),
+  ('MATMAS', N'Material master hub (this database)',  'MDM', 23)
 ) AS s (SYSTEM_CODE, SYSTEM_NAME, SYSTEM_TYPE, DEFAULT_DATE_STYLE)
 ON t.SYSTEM_CODE = s.SYSTEM_CODE
 WHEN NOT MATCHED THEN INSERT (SYSTEM_CODE, SYSTEM_NAME, SYSTEM_TYPE, DEFAULT_DATE_STYLE, CREATED_BY)
@@ -43,28 +44,30 @@ INSERT INTO MATMAS.CTL_CANONICAL_COLUMN (COLUMN_NAME, SQL_TYPE, ORDINAL, DESCRIP
  ('EXT_ATTR_04',              'NVARCHAR(100)',180, NULL),
  ('EXT_ATTR_05',              'NVARCHAR(100)',190, NULL);
 
-/* 3. inbound routes ---------------------------------------------------- */
+/* 3. clean own rows ---------------------------------------------------- */
 DELETE FROM MATMAS.CTL_FIELD_MAPPING WHERE INTEGRATION_ID IN ('IN_JDE_MATMAS_FILE','IN_VISION_MATMAS_FILE','OUT_ALL_TO_TARGET');
 DELETE FROM MATMAS.CTL_PARAMETER;
 DELETE FROM MATMAS.CTL_INBOUND_INTEGRATION  WHERE INTEGRATION_ID IN ('IN_JDE_MATMAS_FILE','IN_VISION_MATMAS_FILE');
 DELETE FROM MATMAS.CTL_OUTBOUND_INTEGRATION WHERE INTEGRATION_ID IN ('OUT_ALL_TO_TARGET');
 
+/* 4. inbound routes: folder MATMAS\inbound\<FOLDER_KEY>, file LIKE FILE_NAME_PATTERN */
 INSERT INTO MATMAS.CTL_INBOUND_INTEGRATION
-  (INTEGRATION_ID, INTEGRATION_NAME, SOURCE_SYSTEM, SOURCE_TYPE, SOURCE_CONNECTION, SOURCE_OBJECT,
-   SOURCE_FOLDER, ARCHIVE_FOLDER, FILE_DELIMITER, EXPECTED_HEADER, LOAD_TYPE, NATURAL_KEY_COLUMNS, RUN_GROUP, RUN_SEQUENCE, CREATED_BY)
+  (INTEGRATION_ID, INTEGRATION_NAME, SOURCE_SYSTEM, SOURCE_TYPE, FOLDER_KEY, FILE_NAME_PATTERN,
+   SOURCE_CONNECTION, SOURCE_FOLDER, ARCHIVE_FOLDER, FILE_DELIMITER, EXPECTED_HEADER,
+   LOAD_TYPE, NATURAL_KEY_COLUMNS, RUN_SEQUENCE, CREATED_BY)
 VALUES
   ('IN_JDE_MATMAS_FILE', N'JDE material master file -> canonical', 'JDE', 'FILE',
-   'FF_MATMAS_JDE', 'JDE_MATMAS.txt',
-   N'C:\Informatica\SecureAgent\MATMAS\inbound\JDE', N'C:\Informatica\SecureAgent\MATMAS\archive\JDE', '|',
+   N'JDE', N'JDE_MATMAS%.txt',
+   'FF_MATMAS_INBOUND', N'MATMAS\inbound\JDE', N'MATMAS\archive\JDE', '|',
    N'ERP Item Number|Material Description|Plant Code|Supplier Part#|Supplier Number|Manufacturing Part#|Start Date|End Date',
-   'FULL', 'SOURCE_SYSTEM,ERP_ITEM_NUMBER,PLANT_CODE,SUPPLIER_NUMBER,SUPPLIER_PART_NUMBER', 'DAILY', 10, 'MATMAS_SETUP'),
+   'FULL', 'SOURCE_SYSTEM,ERP_ITEM_NUMBER,PLANT_CODE,SUPPLIER_NUMBER,SUPPLIER_PART_NUMBER', 10, 'MATMAS_SETUP'),
   ('IN_VISION_MATMAS_FILE', N'Vision material master file -> canonical (layout ASSUMED)', 'VISION', 'FILE',
-   'FF_MATMAS_VISION', 'VISION_MATMAS.txt',
-   N'C:\Informatica\SecureAgent\MATMAS\inbound\VISION', N'C:\Informatica\SecureAgent\MATMAS\archive\VISION', '|',
+   N'VISION', N'VISION_MATMAS%.txt',
+   'FF_MATMAS_INBOUND', N'MATMAS\inbound\VISION', N'MATMAS\archive\VISION', '|',
    N'ITEM_CODE|ITEM_DESC|SITE|VENDOR_ID|VENDOR_PART|PART_PRIORITY|MFR_PART|EFF_FROM|EFF_TO|UOM',
-   'FULL', 'SOURCE_SYSTEM,ERP_ITEM_NUMBER,PLANT_CODE,SUPPLIER_NUMBER,SUPPLIER_PART_NUMBER', 'DAILY', 20, 'MATMAS_SETUP');
+   'FULL', 'SOURCE_SYSTEM,ERP_ITEM_NUMBER,PLANT_CODE,SUPPLIER_NUMBER,SUPPLIER_PART_NUMBER', 20, 'MATMAS_SETUP');
 
-/* 4. JDE field mappings: LANDING_RAW.COLnn -> canonical ---------------- */
+/* 5. JDE field mappings: LANDING_RAW.COLnn -> canonical ---------------- */
 INSERT INTO MATMAS.CTL_FIELD_MAPPING (INTEGRATION_ID, DIRECTION, ORDINAL, SOURCE_COLUMN, TARGET_COLUMN, TRANSFORM_EXPR, VALIDATION_EXPR, DATA_TYPE, MANDATORY_FLAG, KEY_FLAG, DESCRIPTION) VALUES
  ('IN_JDE_MATMAS_FILE','IN', 10,'COL01','ERP_ITEM_NUMBER',
   N'NULLIF(LTRIM(RTRIM(COL01)),'''')', NULL, 'STRING','Y','Y', N'ERP Item Number'),
@@ -94,7 +97,7 @@ INSERT INTO MATMAS.CTL_FIELD_MAPPING (INTEGRATION_ID, DIRECTION, ORDINAL, SOURCE
   N'NULLIF(LTRIM(RTRIM(COL08)),'''') IS NOT NULL AND TRY_CONVERT(DATE, LTRIM(RTRIM(COL08)), 23) IS NULL',
   'DATE','N','N', N'End Date yyyy-mm-dd; defaults to 9999-12-31 when empty');
 
-/* 5. VISION field mappings (layout assumed: dates dd/mm/yyyy, priority P/F) */
+/* 6. VISION field mappings (layout assumed: dates dd/mm/yyyy, priority P/F) */
 INSERT INTO MATMAS.CTL_FIELD_MAPPING (INTEGRATION_ID, DIRECTION, ORDINAL, SOURCE_COLUMN, TARGET_COLUMN, TRANSFORM_EXPR, VALIDATION_EXPR, DATA_TYPE, MANDATORY_FLAG, KEY_FLAG, DESCRIPTION) VALUES
  ('IN_VISION_MATMAS_FILE','IN', 10,'COL01','ERP_ITEM_NUMBER',      N'NULLIF(LTRIM(RTRIM(COL01)),'''')', NULL,'STRING','Y','Y', N'ITEM_CODE'),
  ('IN_VISION_MATMAS_FILE','IN', 20,'COL02','MATERIAL_DESCRIPTION', N'NULLIF(LTRIM(RTRIM(COL02)),'''')', NULL,'STRING','Y','N', N'ITEM_DESC'),
@@ -114,14 +117,14 @@ INSERT INTO MATMAS.CTL_FIELD_MAPPING (INTEGRATION_ID, DIRECTION, ORDINAL, SOURCE
   N'NULLIF(LTRIM(RTRIM(COL09)),'''') IS NOT NULL AND TRY_CONVERT(DATE, LTRIM(RTRIM(COL09)), 103) IS NULL','DATE','N','N', N'EFF_TO dd/mm/yyyy'),
  ('IN_VISION_MATMAS_FILE','IN',110,'COL10','BASE_UOM',             N'UPPER(NULLIF(LTRIM(RTRIM(COL10)),''''))', NULL,'STRING','N','N', N'UOM');
 
-/* 6. outbound route: everything current -> MATERIAL_MASTER_TARGET (same format as the JDE details) */
+/* 7. outbound route: all current materials -> MATERIAL_MASTER_TARGET (JDE-details format) */
 INSERT INTO MATMAS.CTL_OUTBOUND_INTEGRATION
   (INTEGRATION_ID, INTEGRATION_NAME, TARGET_SYSTEM, TARGET_TYPE, TARGET_CONNECTION, TARGET_OBJECT,
-   SOURCE_FILTER, PUBLISH_MODE, RUN_GROUP, RUN_SEQUENCE, CREATED_BY)
+   SOURCE_FILTER, PUBLISH_MODE, RUN_SEQUENCE, CREATED_BY)
 VALUES
   ('OUT_ALL_TO_TARGET', N'All current materials -> MATMAS.MATERIAL_MASTER_TARGET', 'MATMAS', 'TABLE',
-   'SQL_MATMAS', 'MATMAS.MATERIAL_MASTER_TARGET',
-   N'1 = 1', 'FULL', 'DAILY', 10, 'MATMAS_SETUP');
+   'jdbcv2.MSSQL.sqldb-p2o-intg.stg', 'MATMAS.MATERIAL_MASTER_TARGET',
+   N'1 = 1', 'FULL', 10, 'MATMAS_SETUP');
 
 INSERT INTO MATMAS.CTL_FIELD_MAPPING (INTEGRATION_ID, DIRECTION, ORDINAL, SOURCE_COLUMN, TARGET_COLUMN, TRANSFORM_EXPR, DESCRIPTION) VALUES
  ('OUT_ALL_TO_TARGET','OUT', 5,'SOURCE_SYSTEM',           'Source System',        NULL, N'drop this row + column for a strict 8-column target'),
@@ -136,9 +139,9 @@ INSERT INTO MATMAS.CTL_FIELD_MAPPING (INTEGRATION_ID, DIRECTION, ORDINAL, SOURCE
  ('OUT_ALL_TO_TARGET','OUT',70,'START_DATE',              'Start Date',           NULL, NULL),
  ('OUT_ALL_TO_TARGET','OUT',80,'END_DATE',                'End Date',             NULL, NULL);
 
-/* 7. parameters -------------------------------------------------------- */
+/* 8. parameters -------------------------------------------------------- */
 INSERT INTO MATMAS.CTL_PARAMETER (INTEGRATION_ID, PARAM_NAME, PARAM_VALUE, DESCRIPTION) VALUES
- ('*', 'FILE_DELIMITER', '|',                           N'Inbound file contract: pipe delimited, header row, UTF-8'),
- ('*', 'NOTIFY_EMAIL',   'matmas-support@example.com',  N'Failure notification list (replace)'),
- ('*', 'LANDING_RETENTION_DAYS', '30',                  N'Purge LANDING_RAW older than N days');
+ ('*', 'FILE_DELIMITER',         '|',                          N'Inbound file contract: pipe delimited, header row, UTF-8'),
+ ('*', 'NOTIFY_EMAIL',           'matmas-support@example.com', N'Failure notification list (replace)'),
+ ('*', 'LANDING_RETENTION_DAYS', '30',                         N'Purge LANDING_RAW older than N days');
 GO

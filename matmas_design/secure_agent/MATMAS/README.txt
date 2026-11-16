@@ -1,15 +1,22 @@
-Copy this whole MATMAS folder to the Secure Agent machine, e.g.
-  Windows: C:\Informatica\SecureAgent\MATMAS
-  Linux  : /opt/informatica/secureagent/MATMAS
-and point the flat-file connections at the sub-folders:
-  FF_MATMAS_JDE      -> MATMAS\inbound\JDE
-  FF_MATMAS_VISION   -> MATMAS\inbound\VISION
-  FF_MATMAS_TEMPLATE -> MATMAS\inbound\_template   (only used at design time to import the 30-column source)
+MATMAS folder for the Secure Agent (runtime environment US.US02.01)
 
-inbound\<ERP>\<ERP>_MATMAS.txt  : fixed file name per route (CTL_INBOUND_INTEGRATION.SOURCE_OBJECT)
-archive\<ERP>\                   : archive_file script moves the file here with a timestamp suffix after a successful load
-error\                           : move here manually (or extend the taskflow) when a load fails
-outbound\                        : for future FILE type outbound routes
-File contract: UTF-8, pipe (|) delimited, header row, no text qualifier, dates as agreed per ERP.
-When the endpoints start dropping files on a share, only SOURCE_FOLDER/ARCHIVE_FOLDER in
-CTL_INBOUND_INTEGRATION and the directory of the two flat-file connections change.
+Copy this whole folder to the agent machine:
+  Windows: C:\Informatica\SecureAgent\MATMAS     (path used in all docs and commands)
+  Linux  : /opt/informatica/MATMAS               (use the .sh scripts)
+
+inbound\<ERP>\     one folder per ERP; drop files here (*.txt / *.csv, pipe delimited, header row, UTF-8)
+                   JDE\JDE_MATMAS.txt and VISION\VISION_MATMAS.txt are the test files.
+                   A new ERP = a new folder + its rows in MATMAS.CTL_INBOUND_INTEGRATION / CTL_FIELD_MAPPING.
+work\              flat-file connection FF_MATMAS points here.
+                   matmas_filelist.txt = indirect file list, rebuilt before every run by
+                   scripts\matmas_prepare_filelist.cmd (shipped version points at design\LANDING_TEMPLATE.txt
+                   so the mapping designer sees 30 columns).
+design\            LANDING_TEMPLATE.txt (30 columns) for design time only.
+archive\<ERP>\     scripts\matmas_archive_files.cmd moves processed files here as <name>_<timestamp>.<ext>.
+error\             manual quarantine for files you want to keep out of the next run.
+outbound\          for future FILE-type outbound routes.
+scripts\           prepare / archive scripts (.cmd Windows, .sh Linux).
+
+Moving to a share later: change the Directory of connection FF_MATMAS and the root path argument
+of the two commands in mt_MATMAS_LAND / mt_MATMAS_PROCESS. Nothing in SQL changes (routing uses the
+folder name, not the full path).

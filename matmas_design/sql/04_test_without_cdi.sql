@@ -1,55 +1,57 @@
 /* =====================================================================
    MATMAS - 04: end-to-end test of the SQL side WITHOUT Informatica.
-   Simulates what the CDI landing mapping does (inserts the two sample
-   files into LANDING_RAW, header as row 1), then drives the stages
-   exactly as the taskflow does through sp_MATMAS_Run.
+   Step A inserts exactly what m_MATMAS_LAND writes (file path + COL01..),
+   step B inserts what m_MATMAS_PROCESS writes and calls what its Post SQL
+   calls. Expected results are in the comments.
    ===================================================================== */
 SET NOCOUNT ON;
-DECLARE @b VARCHAR(40) = FORMAT(SYSUTCDATETIME(), 'yyyyMMddHHmmss');
-PRINT 'BATCH_ID = ' + @b;
 
-/* ---- iteration 1: route lookup ---------------------------------------- */
-EXEC MATMAS.sp_MATMAS_Run @Stage='GET_IN_ROUTE', @RunGroup='DAILY', @Iteration=1;   -- expect IN_JDE_MATMAS_FILE, TOTAL_ROUTES=2
+/* ---- A. simulate m_MATMAS_LAND reading both inbound folders ---------- */
+INSERT INTO MATMAS.LANDING_RAW (SRC_FILE_NAME, COL01,COL02,COL03,COL04,COL05,COL06,COL07,COL08) VALUES
+ (N'C:\Informatica\SecureAgent\MATMAS\inbound\JDE\JDE_MATMAS.txt', N'ERP Item Number',N'Material Description',N'Plant Code',N'Supplier Part#',N'Supplier Number',N'Manufacturing Part#',N'Start Date',N'End Date'),
+ (N'C:\Informatica\SecureAgent\MATMAS\inbound\JDE\JDE_MATMAS.txt', N'109589',N'SEN,PROXIMITY,29MM,12-24VDC',N'AUR',N'4462658 (Primary)',N'456526',N'4462658 (Fallback)',N'2026-01-01',N'9999-12-31'),
+ (N'C:\Informatica\SecureAgent\MATMAS\inbound\JDE\JDE_MATMAS.txt', N'109589',N'SEN,PROXIMITY,29MM,12-24VDC',N'AUR',N'4462658 (Primary)',N'456526',N'4462658 (Fallback)',N'2026-01-01',N'9999-12-31');
 
-/* ---- simulate CDI landing of secure_agent/MATMAS/inbound/JDE/JDE_MATMAS.txt */
-EXEC MATMAS.sp_MATMAS_Run @Stage='LAND_START', @BatchId=@b, @IntegrationId='IN_JDE_MATMAS_FILE';
-INSERT INTO MATMAS.LANDING_RAW (BATCH_ID, INTEGRATION_ID, SRC_FILE_NAME, SRC_ROW_NUM, COL01,COL02,COL03,COL04,COL05,COL06,COL07,COL08) VALUES
- (@b,'IN_JDE_MATMAS_FILE','JDE_MATMAS.txt',1,'ERP Item Number','Material Description','Plant Code','Supplier Part#','Supplier Number','Manufacturing Part#','Start Date','End Date'),
- (@b,'IN_JDE_MATMAS_FILE','JDE_MATMAS.txt',2,'109589','SEN,PROXIMITY,29MM,12-24VDC','AUR','4462658 (Primary)','456526','4462658 (Fallback)','2026-01-01','9999-12-31'),
- (@b,'IN_JDE_MATMAS_FILE','JDE_MATMAS.txt',3,'109589','SEN,PROXIMITY,29MM,12-24VDC','AUR','4462658 (Primary)','456526','4462658 (Fallback)','2026-01-01','9999-12-31');
-EXEC MATMAS.sp_MATMAS_Run @Stage='LAND_END', @BatchId=@b, @IntegrationId='IN_JDE_MATMAS_FILE', @RowsRead=3, @RowsLoaded=3;
-EXEC MATMAS.sp_MATMAS_Run @Stage='HARMONIZE', @BatchId=@b, @IntegrationId='IN_JDE_MATMAS_FILE';   -- expect inserted=1, exact_duplicates=1
+INSERT INTO MATMAS.LANDING_RAW (SRC_FILE_NAME, COL01,COL02,COL03,COL04,COL05,COL06,COL07,COL08,COL09,COL10) VALUES
+ (N'C:\Informatica\SecureAgent\MATMAS\inbound\VISION\VISION_MATMAS.txt', N'ITEM_CODE',N'ITEM_DESC',N'SITE',N'VENDOR_ID',N'VENDOR_PART',N'PART_PRIORITY',N'MFR_PART',N'EFF_FROM',N'EFF_TO',N'UOM'),
+ (N'C:\Informatica\SecureAgent\MATMAS\inbound\VISION\VISION_MATMAS.txt', N'V-20001',N'SENSOR PROXIMITY 18MM 24VDC',N'MEL',N'78001',N'PX-18-24',N'P',N'PX-18-24',N'01/02/2026',N'31/12/9999',N'EA'),
+ (N'C:\Informatica\SecureAgent\MATMAS\inbound\VISION\VISION_MATMAS.txt', N'V-20001',N'SENSOR PROXIMITY 18MM 24VDC',N'MEL',N'78002',N'PX18-ALT',N'F',N'',N'01/02/2026',N'31/12/9999',N'EA'),
+ (N'C:\Informatica\SecureAgent\MATMAS\inbound\VISION\VISION_MATMAS.txt', N'V-20002',N'CABLE M12 4PIN 5M',N'MEL',N'78001',N'CB-M12-5',N'P',N'CB-M12-5',N'31/02/2026',N'',N'EA');   -- invalid date -> reject
 
-/* ---- iteration 2: VISION -------------------------------------------- */
-EXEC MATMAS.sp_MATMAS_Run @Stage='GET_IN_ROUTE', @RunGroup='DAILY', @Iteration=2;   -- expect IN_VISION_MATMAS_FILE
-EXEC MATMAS.sp_MATMAS_Run @Stage='LAND_START', @BatchId=@b, @IntegrationId='IN_VISION_MATMAS_FILE';
-INSERT INTO MATMAS.LANDING_RAW (BATCH_ID, INTEGRATION_ID, SRC_FILE_NAME, SRC_ROW_NUM, COL01,COL02,COL03,COL04,COL05,COL06,COL07,COL08,COL09,COL10) VALUES
- (@b,'IN_VISION_MATMAS_FILE','VISION_MATMAS.txt',1,'ITEM_CODE','ITEM_DESC','SITE','VENDOR_ID','VENDOR_PART','PART_PRIORITY','MFR_PART','EFF_FROM','EFF_TO','UOM'),
- (@b,'IN_VISION_MATMAS_FILE','VISION_MATMAS.txt',2,'V-20001','SENSOR PROXIMITY 18MM 24VDC','MEL','78001','PX-18-24','P','PX-18-24','01/02/2026','31/12/9999','EA'),
- (@b,'IN_VISION_MATMAS_FILE','VISION_MATMAS.txt',3,'V-20001','SENSOR PROXIMITY 18MM 24VDC','MEL','78002','PX18-ALT','F','','01/02/2026','31/12/9999','EA'),
- (@b,'IN_VISION_MATMAS_FILE','VISION_MATMAS.txt',4,'V-20002','CABLE M12 4PIN 5M','MEL','78001','CB-M12-5','P','CB-M12-5','31/02/2026','','EA');  -- bad date -> reject
-EXEC MATMAS.sp_MATMAS_Run @Stage='LAND_END', @BatchId=@b, @IntegrationId='IN_VISION_MATMAS_FILE', @RowsRead=4, @RowsLoaded=4;
-EXEC MATMAS.sp_MATMAS_Run @Stage='HARMONIZE', @BatchId=@b, @IntegrationId='IN_VISION_MATMAS_FILE';  -- expect inserted=2, rejected=1
+/* ---- B. simulate m_MATMAS_PROCESS: one request row, then its Post SQL */
+INSERT INTO MATMAS.CTL_RUN_REQUEST (REQUEST_SOURCE, REQUEST_NOTE)
+SELECT REQUEST_SOURCE, REQUEST_NOTE FROM MATMAS.V_MATMAS_RUN_REQUEST;     -- note: "pending landing rows: 7"
 
-/* ---- iteration 3: no more inbound routes ------------------------------ */
-EXEC MATMAS.sp_MATMAS_Run @Stage='GET_IN_ROUTE', @RunGroup='DAILY', @Iteration=3;   -- expect STATUS=NONE
-
-/* ---- outbound --------------------------------------------------------- */
-EXEC MATMAS.sp_MATMAS_Run @Stage='GET_OUT_ROUTE', @RunGroup='DAILY', @Iteration=1;  -- expect OUT_ALL_TO_TARGET
-EXEC MATMAS.sp_MATMAS_Run @Stage='PUBLISH', @BatchId=@b, @IntegrationId='OUT_ALL_TO_TARGET';   -- expect published=3
+EXEC MATMAS.sp_MATMAS_Process;
 
 /* ---- results ---------------------------------------------------------- */
-SELECT 'TARGET' AS what, * FROM MATMAS.MATERIAL_MASTER_TARGET ORDER BY [Source System], [ERP Item Number];
+-- expected: STATUS = SUCCESS, files=2 routed=2
+SELECT TOP 1 'RUN' AS what, * FROM MATMAS.CTL_RUN_REQUEST ORDER BY RUN_ID DESC;
+
+-- expected 3 rows: JDE 109589 (once), VISION V-20001 x2 (vendors 78001 primary, 78002 fallback)
+SELECT 'TARGET' AS what, * FROM MATMAS.MATERIAL_MASTER_TARGET ORDER BY [Source System], [ERP Item Number], [Supplier Number];
+
 SELECT 'CANONICAL' AS what, SOURCE_SYSTEM, ERP_ITEM_NUMBER, PLANT_CODE, SUPPLIER_NUMBER, SUPPLIER_PART_NUMBER, SUPPLIER_PART_ROLE,
        MANUFACTURER_PART_NUMBER, MANUFACTURER_PART_ROLE, START_DATE, END_DATE, ITEM_STATUS, CURRENT_FLAG, VALID_FROM_TS
 FROM   MATMAS.MATERIAL_MASTER ORDER BY SOURCE_SYSTEM, ERP_ITEM_NUMBER, VALID_FROM_TS;
-SELECT 'REJECTS' AS what, * FROM MATMAS.MATERIAL_MASTER_REJECT WHERE BATCH_ID = @b;
-SELECT 'RUN LOG' AS what, * FROM MATMAS.CTL_BATCH_RUN WHERE BATCH_ID = @b ORDER BY START_TS;
 
-/* ---- optional: run the JDE file again with a changed description to see SCD2 ----
-DECLARE @b2 VARCHAR(40) = FORMAT(SYSUTCDATETIME(), 'yyyyMMddHHmmss');
-INSERT INTO MATMAS.LANDING_RAW (BATCH_ID, INTEGRATION_ID, SRC_FILE_NAME, SRC_ROW_NUM, COL01,COL02,COL03,COL04,COL05,COL06,COL07,COL08) VALUES
- (@b2,'IN_JDE_MATMAS_FILE','JDE_MATMAS.txt',1,'ERP Item Number','Material Description','Plant Code','Supplier Part#','Supplier Number','Manufacturing Part#','Start Date','End Date'),
- (@b2,'IN_JDE_MATMAS_FILE','JDE_MATMAS.txt',2,'109589','SEN,PROXIMITY,29MM,12-24VDC,IP67','AUR','4462658 (Primary)','456526','4462658 (Fallback)','2026-01-01','9999-12-31');
-EXEC MATMAS.sp_MATMAS_Run @Stage='HARMONIZE', @BatchId=@b2, @IntegrationId='IN_JDE_MATMAS_FILE';  -- expect inserted=1 closed_changed=1
--------------------------------------------------------------------------------- */
+-- expected 1 row: V-20002 'INVALID START_DATE'
+SELECT 'REJECTS' AS what, * FROM MATMAS.MATERIAL_MASTER_REJECT
+WHERE  BATCH_ID = (SELECT TOP 1 BATCH_ID FROM MATMAS.CTL_RUN_REQUEST ORDER BY RUN_ID DESC);
+
+-- expected: ASSIGN x2, HARMONIZE x2 (JDE exact_duplicates=1), PUBLISH published=3
+SELECT 'RUN LOG' AS what, * FROM MATMAS.V_MATMAS_RUN_STATUS
+WHERE  RUN_ID = (SELECT MAX(RUN_ID) FROM MATMAS.CTL_RUN_REQUEST) ORDER BY STAGE, INTEGRATION_ID;
+
+/* ---- optional C: change history (SCD2). Run after A+B. ---------------
+INSERT INTO MATMAS.LANDING_RAW (SRC_FILE_NAME, COL01,COL02,COL03,COL04,COL05,COL06,COL07,COL08) VALUES
+ (N'C:\Informatica\SecureAgent\MATMAS\inbound\JDE\JDE_MATMAS.txt', N'ERP Item Number',N'Material Description',N'Plant Code',N'Supplier Part#',N'Supplier Number',N'Manufacturing Part#',N'Start Date',N'End Date'),
+ (N'C:\Informatica\SecureAgent\MATMAS\inbound\JDE\JDE_MATMAS.txt', N'109589',N'SEN,PROXIMITY,29MM,12-24VDC,IP67',N'AUR',N'4462658 (Primary)',N'456526',N'4462658 (Fallback)',N'2026-01-01',N'9999-12-31');
+EXEC MATMAS.sp_MATMAS_Process;   -- expected JDE: inserted=1 closed_changed=1; target shows the new description
+------------------------------------------------------------------------ */
+
+/* ---- optional D: reset test data ------------------------------------
+TRUNCATE TABLE MATMAS.LANDING_RAW; TRUNCATE TABLE MATMAS.MATERIAL_MASTER; TRUNCATE TABLE MATMAS.MATERIAL_MASTER_REJECT;
+TRUNCATE TABLE MATMAS.MATERIAL_MASTER_OUTBOUND; TRUNCATE TABLE MATMAS.MATERIAL_MASTER_TARGET; TRUNCATE TABLE MATMAS.CTL_BATCH_RUN;
+TRUNCATE TABLE MATMAS.CTL_RUN_REQUEST;
+------------------------------------------------------------------------ */
