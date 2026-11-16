@@ -5,7 +5,7 @@ A scheduled cloud taskflow reads `MATMAS.CTL_MATMAS_ROUTE` row by row. For each 
 | Path | What it is |
 |---|---|
 | `01_MATMAS_Design.md` | Requirements, flow, objects, config columns, sample walk-through, decisions |
-| `cdi/import/MATMAS_CDI_Import.zip` | **Import package**: taskflow, 2 file ingestion tasks, 4 mappings and 4 mapping tasks. No scripts and no new connections |
+| `cdi/import/MATMAS_CDI_Import_Part1_Mappings.zip` | **Import Part 1**: 4 mappings and 4 mapping tasks. Part 2, the taskflow, is generated once the 2 ingestion tasks exist. See `cdi/IMPORT_README.md` |
 | `cdi/IMPORT_README.md` | Import steps and the 10-minute post-import checklist |
 | `cdi/tools/build_matmas_import.py` | Regenerates the package. Every format is copied from real IDMC exports |
 | `cdi/CDI_Build_Guide.md` | Every CDI object with parameters, expressions and the taskflow step table |

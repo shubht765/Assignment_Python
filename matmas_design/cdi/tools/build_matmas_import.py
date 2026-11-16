@@ -696,7 +696,12 @@ def main():
     ap.add_argument("--onelake-guid", default="oNeLaKe0P2o0MaTmAs0000")
     ap.add_argument("--onelake-handle", default="018Z0P0B0000000000XX")
     ap.add_argument("--out", default=os.path.join(HERE, "..", "import", "MATMAS_CDI_Import.zip"))
+    ap.add_argument("--no-taskflow", action="store_true",
+                    help="Part 1: only mappings, mapping tasks and their connections / agent groups")
+    ap.add_argument("--fi-collect", help="GUID of the existing file ingestion task fi_P2O_100_MATMAS_Agent_to_OneLake (Part 2)")
+    ap.add_argument("--fi-move", help="GUID of the existing file ingestion task fi_P2O_101_MATMAS_OneLake_Move (Part 2)")
     a = ap.parse_args()
+    existing_fi = bool(a.fi_collect and a.fi_move)
     onelake = (a.onelake_guid, a.onelake_handle)
 
     G = {k: guid() for k in ("reader_m", "load_m", "outcome_m", "log_m", "reader_t", "load_t", "outcome_t", "log_t",
@@ -771,22 +776,25 @@ def main():
         files[f"Explore/{PROJECT}/mt_{N[k]}.MTT.zip"] = mtt(f"mt_{N[k]}", tg, mg, m, [sp, tp])
         entry(tg, f"mt_{N[k]}", "MTT", PATH, sorted(m.conns | {AG[CENTRAL_AG][0], mg}))
 
-    landing_jde = ONELAKE_ROOT + "/landing/JDE"
-    mi_defs = {"mi_collect": ("US.US02.01", "local", "onelake", r"D:\Interfaces\JDE\MATMAS\outbound", "JDE_MATMAS*.txt", landing_jde, "DELETE"),
-               "mi_move": (CENTRAL_AG, "onelake", "onelake", landing_jde, "*", ONELAKE_ROOT + "/archive/JDE", "DELETE")}
-    for k, (agn, s, tg_, sp_, pat, tp_, dele) in mi_defs.items():
-        handle = str(MI_HANDLE[k])
-        files[f"Explore/{PROJECT}/{MI[k]}.MI_TASK.dat"] = mi_task(MI[k], G[k], agn, s, tg_, sp_, pat, tp_, dele, onelake, handle)
-        refs = [AG[agn][0]] + ([onelake[0]] if "onelake" in (s, tg_) else [])
-        entry(G[k], MI[k], "MI_TASK", PATH, refs, ctype="Binary", major=1, ctx=False, repo=handle)
-
-    ids = {"reader": (f"mt_{N['reader']}", G["reader_t"]), "load": (f"mt_{N['load']}", G["load_t"]),
-           "outcome": (f"mt_{N['outcome']}", G["outcome_t"]), "log": (f"mt_{N['log']}", G["log_t"]),
-           "mi_collect": (MI["mi_collect"], G["mi_collect"]), "mi_move": (MI["mi_move"], G["mi_move"])}
-    tf_xml = build_taskflow(TFN, G["tf"], ids)
-    files[f"Explore/{PROJECT}/{TFN}.TASKFLOW.xml"] = tf_xml
-    entry(G["tf"], TFN, "TASKFLOW", PATH, [G[k] for k in ("reader_t", "load_t", "outcome_t", "log_t", "mi_collect", "mi_move")],
-          ctype="application/json; charset=utf-8", major=1, ctx=False)
+    if not a.no_taskflow:
+        if existing_fi:
+            # Part 2: the ingestion tasks already exist in the org (copied from fi_P2O_000) - reference them, don't ship them
+            G["mi_collect"], G["mi_move"] = a.fi_collect, a.fi_move
+        else:
+            landing_jde = ONELAKE_ROOT + "/landing/JDE"
+            mi_defs = {"mi_collect": ("US.US02.01", "local", "onelake", r"D:\Interfaces\JDE\MATMAS\outbound", "JDE_MATMAS*.txt", landing_jde, "DELETE"),
+                       "mi_move": (CENTRAL_AG, "onelake", "onelake", landing_jde, "*", ONELAKE_ROOT + "/archive/JDE", "DELETE")}
+            for k, (agn, s_, tg_, sp_, pat, tp_, dele) in mi_defs.items():
+                handle = str(MI_HANDLE[k])
+                files[f"Explore/{PROJECT}/{MI[k]}.MI_TASK.dat"] = mi_task(MI[k], G[k], agn, s_, tg_, sp_, pat, tp_, dele, onelake, handle)
+                refs = [AG[agn][0]] + ([onelake[0]] if "onelake" in (s_, tg_) else [])
+                entry(G[k], MI[k], "MI_TASK", PATH, refs, ctype="Binary", major=1, ctx=False, repo=handle)
+        ids = {"reader": (f"mt_{N['reader']}", G["reader_t"]), "load": (f"mt_{N['load']}", G["load_t"]),
+               "outcome": (f"mt_{N['outcome']}", G["outcome_t"]), "log": (f"mt_{N['log']}", G["log_t"]),
+               "mi_collect": (MI["mi_collect"], G["mi_collect"]), "mi_move": (MI["mi_move"], G["mi_move"])}
+        files[f"Explore/{PROJECT}/{TFN}.TASKFLOW.xml"] = build_taskflow(TFN, G["tf"], ids)
+        entry(G["tf"], TFN, "TASKFLOW", PATH, [G[k] for k in ("reader_t", "load_t", "outcome_t", "log_t", "mi_collect", "mi_move")],
+              ctype="application/json; charset=utf-8", major=1, ctx=False)
 
     pkg = f"MATMAS_CDI_Import-{now_ms()}"
     files["exportMetadata.v2.json"] = json.dumps({"name": pkg, "sourceOrgId": ORG_ID, "sourceOrgName": ORG_NAME,

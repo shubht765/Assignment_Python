@@ -1,6 +1,42 @@
-# MATMAS – import package `cdi/import/MATMAS_CDI_Import.zip`
+# MATMAS – import in two parts
 
-One zip with the whole CDI process for the material master. It has no scripts, no command tasks and no extra connections. Import it into project `zPF_TCS_Shubham` of the Berry Global-Dev org.
+The full zip failed with *"One or more objects are missing required dependent objects"*. The import did not recognize the two generated file ingestion tasks, so the taskflow lost its dependencies. The import therefore runs in two parts.
+
+## Part 1: mappings and mapping tasks (import now)
+
+1. Import `cdi/import/MATMAS_CDI_Import_Part1_Mappings.zip`. It contains the 4 mappings and the 4 mapping tasks, all of which showed **Create object** (green) in your last attempt. It also contains their connections and agent groups, which the import never overwrites.
+2. If the import asks you to map `FABRIC.AMCOR.ONELAKE.P2O` or `jdbcv2.MSSQL.sqldb-p2o-intg.stg`, select your existing connection.
+
+## Create the 2 file ingestion tasks (about 5 minutes)
+
+In Explore, open `fi_P2O_000_BPDWFS_PO_to_OneLake`, then use **Copy** twice. Name the copies exactly as shown, because the taskflow refers to these names.
+
+| Setting | `fi_P2O_100_MATMAS_Agent_to_OneLake` | `fi_P2O_101_MATMAS_OneLake_Move` |
+|---|---|---|
+| Runtime environment | `US.US02.01`. The taskflow overrides it per route. | `US.US02.01` |
+| Source | **Local folder**, directory `D:\Interfaces\JDE\MATMAS\outbound`, pattern `JDE_MATMAS*.txt`. Overridden per route. | **Microsoft Fabric OneLake** `FABRIC.AMCOR.ONELAKE.P2O`, folder `/lh_p2o_intg_dev/Files/erp_to_matmas/landing/JDE`, pattern `*` |
+| After transfer | **Delete** source files | **Delete** source files |
+| Target | `FABRIC.AMCOR.ONELAKE.P2O`, location `/lh_p2o_intg_dev/Files/erp_to_matmas/landing/JDE` | `FABRIC.AMCOR.ONELAKE.P2O`, location `/lh_p2o_intg_dev/Files/erp_to_matmas/archive/JDE` |
+| If file exists | Overwrite | Overwrite |
+| Schedule / file listener | None | None |
+
+The folders above are only defaults. The taskflow overrides them on every run from `MATMAS.CTL_MATMAS_ROUTE`.
+
+## Part 2: the taskflow
+
+1. In Explore, select the two new tasks, then **Export**. Including dependencies is fine.
+2. Send me that export zip. Its contents list holds both task IDs.
+3. I regenerate the taskflow pointing at your two tasks, using this command:
+   ```
+   python3 cdi/tools/build_matmas_import.py --fi-collect <id of fi_P2O_100> --fi-move <id of fi_P2O_101> --out cdi/import/MATMAS_CDI_Import_Part2_Taskflow.zip
+   ```
+4. Import `MATMAS_CDI_Import_Part2_Taskflow.zip`. It also contains the Part 1 objects, which show as existing. Leave the overwrite option on.
+
+The same export also contains the real ID of the OneLake connection, which removes that placeholder too.
+
+---
+
+## Reference: the full flow and checks
 
 ## The flow
 
