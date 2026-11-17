@@ -569,7 +569,10 @@ class TF:
         xml = "".join(b(ids_[i], ids_[i + 1] if i + 1 < len(builders) else None) for i, b in enumerate(builders))
         return (ids_[0] if ids_ else None), xml
 
-    def decision(self, own, nxt, title, left, right, branch, otherwise=()):
+    def decision(self, own, nxt, title, left, right, branch, otherwise=(), op="less-or-equals"):
+        """left must be a field ($temp.X): the designer validates 'Field' decisions only that way
+        ('Cannot find the fields and {1' otherwise). right may be a field or a constant, as in the
+        published taskflows: equals {$temp.INITIAL_LOAD_SUCCESS} {3}."""
         f1, f2 = self.id(), self.id()
         _, x1 = self.seq(list(branch))
         _, x2 = self.seq(list(otherwise))
@@ -577,12 +580,12 @@ class TF:
         return (f'<container id="{own}" type="exclusive"><title>{self.x(title)}</title>'
                 f'<flow id="{f1}">{x1}{back()}</flow><flow id="{f2}">{x2}{back()}</flow>'
                 f'<link id="{self.id()}" targetId="{f1}" type="containerLink"><condition source="formula">'
-                f'<function name="less-or-equals"><arg name="left">{{{left}}}</arg><arg name="right">{{{right}}}</arg></function>'
+                f'<function name="{op}"><arg name="left">{{{left}}}</arg><arg name="right">{{{right}}}</arg></function>'
                 f'</condition></link><link id="{self.id()}" targetId="{f2}" type="containerLink"/>'
                 f'{self.lnk(nxt)}</container>')
 
 
-def build_taskflow(tf_name, tf_guid, ids):
+def build_taskflow(tf_name, tf_guid, ids, collect_only=False):
     t = TF()
     q = lambda s: "'" + s.replace("'", "''") + "'"
     # builder factories: each returns callable(own, nxt)
@@ -590,7 +593,7 @@ def build_taskflow(tf_name, tf_guid, ids):
     D = lambda step, key, i, out=(), ignore=False: (lambda o, n: t.data_task(o, n, step, ids[key][0], ids[key][1], i, list(out), ignore))
     I = lambda step, key, st, tt, ov: (lambda o, n: t.ingestion(o, n, step, ids[key][0], ids[key][1], st, tt, ov))
     X = lambda step, rt, script, args: (lambda o, n: t.command(o, n, step, rt, script, args))
-    DEC = lambda title, l, r, br, ot=(): (lambda o, n: t.decision(o, n, title, l, r, br, ot))
+    DEC = lambda title, l, r, br, ot=(), op="equals": (lambda o, n: t.decision(o, n, title, l, r, br, ot, op))
     J = lambda target: (lambda o, n: t.jump(o, n, target))
     LOG = lambda step, event, msg: D(step, "log", [("RUN_ID", "$temp.RUN_ID"), ("ROUTE_ID", "$temp.ROUTE_ID"),
                                                   ("EVENT", q(event)), ("MESSAGE", msg)], ignore=True)
@@ -607,6 +610,9 @@ def build_taskflow(tf_name, tf_guid, ids):
     oc = "$temp.DT_Outcome[1]/inout[1]/OUTCOME"
 
     files_branch = [
+        LOG("DT_LogCollected", "COLLECTED", "concat(string($temp.FILES), ' file(s) copied to ', $temp.RUN_LANDING_DIR, "
+                                           "' - processed by the Fabric notebook nb_matmas_process')")
+    ] if collect_only else [
         D("DT_Load", "load", [("RUN_ID", "$temp.RUN_ID"), ("ROUTE_ID", "$temp.ROUTE_ID"), ("SRC_DIRECTORY", f"fn:substring-after($temp.RUN_LANDING_DIR, '{ONELAKE_LAKEHOUSE_PATH}/')"),
                               ("START_DATE_VALUE", "$temp.START_DATE_VALUE"), ("END_DATE_VALUE", "$temp.END_DATE_VALUE")], ignore=True),
         D("DT_Outcome", "outcome", [("RUN_ID", "$temp.RUN_ID"), ("ROUTE_ID", "$temp.ROUTE_ID"), ("OUTCOME", "''")], ["OUTCOME"], ignore=True),
@@ -623,13 +629,14 @@ def build_taskflow(tf_name, tf_guid, ids):
            ("CATEGORYTarget[1]/oneLakeTargetLocation", "$temp.RUN_LANDING_DIR")]),
         A("CountFiles", [("temp.FILES", "if (string($temp.IT_Collect[1]/output[1]/successFiles) = '') then 0 "
                                         "else number($temp.IT_Collect[1]/output[1]/successFiles)")]),
-        DEC("Files found?", "1", "$temp.FILES", files_branch,
+        DEC("Files found?", "$temp.FILES", "0",
             [LOG("DT_LogNoFile", "NO_FILE", "concat('no ', $temp.FILE_PATTERN, ' in ', $temp.SOURCE_DIRECTORY, ' on ', "
-                                            "$temp.RUNTIME_ENVIRONMENT, ' (or the collect step failed)')")]),
+                                            "$temp.RUNTIME_ENVIRONMENT, ' (or the collect step failed)')")],
+            files_branch),
     ]
     init_id, loop_id = t.id(), t.id()
     loop_branch = [D("DT_ReadRoute", "reader", reader_in, READER_OUT), A("TakeRoute", take),
-                   DEC("Route found?", "1", "$temp.HAS_ROUTE", route_branch),
+                   DEC("Route found?", "$temp.HAS_ROUTE", "1", route_branch),
                    A("NextRow", [("temp.ROW_ID", "$temp.ROW_ID + 1")]), J(loop_id)]
     init = t.assignment(init_id, loop_id, "Init", [
         ("temp.RUN_ID", "fn:format-dateTime(fn:adjust-dateTime-to-timezone(fn:current-dateTime(), xs:dayTimeDuration('PT0S')), "
@@ -638,8 +645,9 @@ def build_taskflow(tf_name, tf_guid, ids):
 
     temps = "".join(f'<field description="" name="{n}" type="{ty}"><options><option name="required">false</option></options></field>'
                     for n, ty in [("RUN_ID", "string"), ("ROW_ID", "double"), ("TOTAL", "double"), ("HAS_ROUTE", "double"),
-                                  ("FILES", "double"), ("OUTCOME", "string"), ("MOVE_TARGET_DIR", "string"),
-                                  ("RUN_LANDING_DIR", "string")] + [(p, "string") for p in READER_OUT[1:]])
+                                  ("FILES", "double"), ("RUN_LANDING_DIR", "string")]
+                    + ([] if collect_only else [("OUTCOME", "string"), ("MOVE_TARGET_DIR", "string")])
+                    + [(p, "string") for p in READER_OUT[1:]])
     pos = ""
     for po, kind in t.po.items():
         fields = {"mt": [("InOut Parameters", "inout", "reference"), ("TaskProperties Parameters", "taskProperties", "reference"),
@@ -676,7 +684,7 @@ def build_taskflow(tf_name, tf_guid, ids):
                    overrideAPIName="false">
             <parameterSet xmlns="http://schemas.active-endpoints.com/appmodules/screenflow/2021/04/taskflowModel.xsd"/>
             <appliesTo/>
-            <description>MATMAS: loop over cfg.matmas_route_config - collect agent files to OneLake, load, route files, archive.</description>
+            <description>{TF_DESC_COLLECT if collect_only else TF_DESC_FULL}</description>
             <tags/>
             <generator>Informatica Process Designer 11</generator>
             <input><parameter description="" name="RUN_GROUP" type="string"><options><option name="required">false</option></options></parameter></input>
@@ -701,6 +709,11 @@ def build_taskflow(tf_name, tf_guid, ids):
     return xml.encode()
 
 
+TF_DESC_FULL = "MATMAS: loop over cfg.matmas_route_config - collect agent files to OneLake, load, route files, archive."
+TF_DESC_COLLECT = ("MATMAS collect: loop over cfg.matmas_route_config - copy each route's source files to OneLake "
+                   "landing/ERP/RUN_ID and delete them at the source. Loading, audit and archiving: Fabric notebook nb_matmas_process.")
+
+
 # ================================================================== main
 def main():
     ap = argparse.ArgumentParser()
@@ -711,12 +724,15 @@ def main():
                     help="Part 1: only mappings, mapping tasks and their connections / agent groups")
     ap.add_argument("--fi-collect", help="GUID of the existing file ingestion task fi_P2O_100_MATMAS_Agent_to_OneLake (Part 2)")
     ap.add_argument("--fi-move", help="GUID of the existing file ingestion task fi_P2O_101_MATMAS_OneLake_Move (Part 2)")
+    ap.add_argument("--collect-only", action="store_true",
+                    help="hybrid design: reader + log mappings, fi_P2O_100 and tf_P2O_110_MATMAS_Collect only "
+                         "(loading is done by the Fabric notebook)")
     a = ap.parse_args()
     existing_fi = bool(a.fi_collect and a.fi_move)
     onelake = (a.onelake_guid, a.onelake_handle)
 
     G = {k: guid() for k in ("reader_m", "load_m", "outcome_m", "log_m", "reader_t", "load_t", "outcome_t", "log_t",
-                             "mi_collect", "mi_move", "tf", "ff_conn")}
+                             "mi_collect", "mi_move", "tf", "ff_conn", "tf_collect")}   # append only: keeps earlier GUIDs
     N = {"reader": "P2O_101_MATMAS_Route_Reader", "load": "P2O_102_MATMAS_Load",
          "outcome": "P2O_103_MATMAS_Outcome", "log": "P2O_104_MATMAS_Log"}
     MI = {"mi_collect": "fi_P2O_100_MATMAS_Agent_to_OneLake", "mi_move": "fi_P2O_101_MATMAS_OneLake_Move"}
@@ -726,6 +742,9 @@ def main():
 
     maps = {"reader": m_reader("m_" + N["reader"]), "load": m_load("m_" + N["load"], onelake[0]),
             "outcome": m_outcome("m_" + N["outcome"]), "log": m_log("m_" + N["log"])}
+    if a.collect_only:
+        maps = {k: maps[k] for k in ("reader", "log")}
+        TFN = "tf_P2O_110_MATMAS_Collect"
     files, manifest, csv = {}, [], ["objectPath,objectName,objectType,id"]
 
     def entry(guid_, name, otype, path, refs, ctype="JSON", state="VALID", major=0, ctx=True, desc="", repo=None):
@@ -795,6 +814,8 @@ def main():
             landing_jde = ONELAKE_ROOT + "/landing/JDE"
             mi_defs = {"mi_collect": ("US.US02.01", "local", "onelake", r"D:\Interfaces\JDE\MATMAS\outbound", "JDE_MATMAS*.txt", landing_jde, "DELETE"),
                        "mi_move": (CENTRAL_AG, "onelake", "onelake", landing_jde, "*", ONELAKE_ROOT + "/archive/JDE", "DELETE")}
+            if a.collect_only:
+                del mi_defs["mi_move"]
             for k, (agn, s_, tg_, sp_, pat, tp_, dele) in mi_defs.items():
                 handle = str(MI_HANDLE[k])
                 files[f"Explore/{PROJECT}/{MI[k]}.MI_TASK.dat"] = mi_task(MI[k], G[k], agn, s_, tg_, sp_, pat, tp_, dele, onelake, handle)
@@ -803,8 +824,11 @@ def main():
         ids = {"reader": (f"mt_{N['reader']}", G["reader_t"]), "load": (f"mt_{N['load']}", G["load_t"]),
                "outcome": (f"mt_{N['outcome']}", G["outcome_t"]), "log": (f"mt_{N['log']}", G["log_t"]),
                "mi_collect": (MI["mi_collect"], G["mi_collect"]), "mi_move": (MI["mi_move"], G["mi_move"])}
-        files[f"Explore/{PROJECT}/{TFN}.TASKFLOW.xml"] = build_taskflow(TFN, G["tf"], ids)
-        entry(G["tf"], TFN, "TASKFLOW", PATH, [G[k] for k in ("reader_t", "load_t", "outcome_t", "log_t", "mi_collect", "mi_move")],
+        tf_guid = G["tf_collect"] if a.collect_only else G["tf"]
+        deps = ("reader_t", "log_t", "mi_collect") if a.collect_only else \
+               ("reader_t", "load_t", "outcome_t", "log_t", "mi_collect", "mi_move")
+        files[f"Explore/{PROJECT}/{TFN}.TASKFLOW.xml"] = build_taskflow(TFN, tf_guid, ids, collect_only=a.collect_only)
+        entry(tf_guid, TFN, "TASKFLOW", PATH, [G[k] for k in deps],
               ctype="application/json; charset=utf-8", major=1, ctx=False)
 
     pkg = f"MATMAS_CDI_Import-{now_ms()}"
